@@ -23,3 +23,6 @@ data/profile_photo.jpg
 
 # Bewerbungsfoto: local only, never committed, never sent to a model
 data/profile_photo.*
+CLAUDE.md
+
+/CLAUDE.md
