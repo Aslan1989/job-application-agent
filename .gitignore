@@ -21,4 +21,3 @@ logs/
 
 # Bewerbungsfoto: local only, never committed, never sent to a model
 data/profile_photo.*
-data/profile_photo.jpg

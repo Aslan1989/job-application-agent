@@ -505,11 +505,21 @@ def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str
     """
     language = evidence.language if evidence.language in LETTER_LABELS else "de"
     focus = _focus(evidence.track, language)
+    printable_role = clean_role(role) or role
     top_skills = [skill.name for skill in evidence.skills[:4]]
     project = evidence.projects[0] if evidence.projects else None
     second = evidence.projects[1] if len(evidence.projects) > 1 else None
-    requirements = ", ".join(display_requirement(item)
-                             for item in evidence.matched_requirements[:6])
+    def listed(items: Sequence[str], joiner: str) -> str:
+        """A readable list: "A, B und C" rather than "A, B, C"."""
+        names = [display_requirement(item) for item in items]
+        if not names:
+            return ""
+        if len(names) == 1:
+            return names[0]
+        return ", ".join(names[:-1]) + f" {joiner} " + names[-1]
+
+    requirements = listed(evidence.matched_requirements[:6], "und")
+    requirements_en = listed(evidence.matched_requirements[:6], "and")
 
     def tech_list(project: Any, joiner: str) -> str:
         names = list(project.technologies())[:5]
@@ -520,9 +530,10 @@ def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str
         return ", ".join(names[:-1]) + f" {joiner} " + names[-1]
 
     if language == "de":
-        first = (f"ich bewerbe mich auf die Position als {role} bei {company}. "
-                 f"Mein Schwerpunkt liegt auf {focus}; meine praktischen Kenntnisse "
-                 f"stammen aus eigenen Projekten und aus meiner Ausbildung.")
+        first = (f"ich bewerbe mich auf die Position als {printable_role} bei "
+                 f"{company}. Mein Schwerpunkt liegt auf {focus}; meine "
+                 "praktischen Kenntnisse stammen aus eigenen Projekten und aus "
+                 "meiner Ausbildung.")
         technical = "Meine technischen Schwerpunkte sind " + ", ".join(top_skills) + "."
         if project is not None:
             stack = tech_list(project, "und")
@@ -535,8 +546,8 @@ def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str
                 technical += (f" Das Projekt {second.name} ergänzt dies um "
                               f"{stack}.")
         if requirements:
-            technical += (f" Die in Ihrer Anzeige genannten Themen {requirements} "
-                          "deckt diese Projektarbeit ab.")
+            technical += (" Diese Projektarbeit deckt die in Ihrer Anzeige "
+                          f"genannten Themen {requirements} ab.")
         roles = ", ".join(
             f"{item.titled('de') or ROLE_TITLES['de'].get(item.title, item.title)} "
             f"({format_month(item.start, 'de')} bis {format_month(item.end, 'de')})"
@@ -551,9 +562,9 @@ def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str
             transferable += f" Verfügbar bin ich {evidence.availability}."
         paragraphs = (first, technical, transferable)
     else:
-        first = (f"I am applying for the position of {role} at {company}. "
-                 f"My focus is {focus}, built through personal projects and my "
-                 "programming education.")
+        first = (f"I am applying for the position of {printable_role} at "
+                 f"{company}. My focus is {focus}, built through personal "
+                 "projects and my programming education.")
         technical = "My technical focus areas are " + ", ".join(top_skills) + "."
         if project is not None:
             stack = tech_list(project, "and")
@@ -564,8 +575,8 @@ def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str
             stack = tech_list(second, "and")
             if stack:
                 technical += f" My {second.name} project adds {stack}."
-        if requirements:
-            technical += (f" This covers the {requirements} named in your advert.")
+        if requirements_en:
+            technical += f" This covers the {requirements_en} named in your advert."
         roles = ", ".join(f"{ROLE_TITLES['en'].get(item.title, item.title)} "
                           f"({format_month(item.start, 'en')} to "
                           f"{format_month(item.end, 'en')})"

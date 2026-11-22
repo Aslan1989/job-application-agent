@@ -40,8 +40,8 @@ from reportlab.platypus.doctemplate import LayoutError
 
 from .contact import ContactDetails
 from .content import CvContent, LetterContent, today_long
-from .layout import (MAX_PAGES, MODERN, PREFERRED_PAGES, CvStyle, LayoutReport,
-                     assess_pages, pdf_page_count)
+from .layout import (MAX_COMFORTABLE_FILL, MAX_PAGES, MODERN, PREFERRED_PAGES,
+                     CvStyle, LayoutReport, assess_pages, pdf_page_count)
 
 log = logging.getLogger("job_agent.documents.pdf")
 
@@ -379,20 +379,37 @@ def render_cv_pdf(cv: CvContent, contact: ContactDetails, path: Path | str, *,
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     attempts: list[str] = []
-    pages, fill, clipped = _build_once(cv, contact, style, target)
-    attempts.append(f"{style.tier}:{pages}p")
-    used = style
+    ladder = style.tiers() if fit_pages else (style,)
 
-    if fit_pages and not clipped and pages > PREFERRED_PAGES:
-        compact = style.compacted()
-        tight_pages, tight_fill, tight_clipped = _build_once(cv, contact, compact,
-                                                             target)
-        attempts.append(f"{compact.tier}:{tight_pages}p")
-        if not tight_clipped and 0 < tight_pages <= PREFERRED_PAGES:
-            pages, fill, clipped, used = tight_pages, tight_fill, tight_clipped, compact
+    # Walk the ladder from roomiest to tightest and stop at the first tier that
+    # fits one page with a little slack at the bottom. A tier that fits but
+    # fills the page to the last millimetre is remembered as a fallback, not
+    # accepted outright: the DOCX repaginates in Word and would spill.
+    pages = fill = 0
+    clipped = ""
+    used = style
+    fallback: tuple[int, float, CvStyle] | None = None
+    for candidate in ladder:
+        pages, fill, clipped = _build_once(cv, contact, candidate, target)
+        used = candidate
+        attempts.append(f"{candidate.tier}:{pages}p")
+        if clipped:
+            break
+        if 0 < pages <= PREFERRED_PAGES:
+            if fill <= MAX_COMFORTABLE_FILL:
+                break
+            if fallback is None:
+                fallback = (pages, fill, candidate)
+    else:
+        if fallback is not None:
+            # Every tier that fitted was packed to the edge; take the roomiest
+            # of them and re-render it, since the file now holds the last try.
+            _, _, used = fallback
+            pages, fill, clipped = _build_once(cv, contact, used, target)
+            attempts.append(f"{used.tier}:kept")
         else:
-            # Compacting did not buy a page, so it bought nothing. Re-render at
-            # the roomier tier: a balanced two pages beats cramped text.
+            # No tier won a single page, so tightening bought nothing. Restore
+            # the roomiest: a balanced two pages beats cramped text.
             pages, fill, clipped = _build_once(cv, contact, style, target)
             used = style
             attempts.append(f"{style.tier}:restored")

@@ -562,7 +562,7 @@ wheels = [
 
 [[package]]
 name = "job-application-agent"
-version = "0.13.0"
+version = "0.13.1"
 source = { editable = "." }
 dependencies = [
     { name = "google-api-python-client" },

@@ -25,7 +25,8 @@ from job_agent.documents.content import (CvContent, CvEntry, CvSection, build_cv
                                          format_dates, format_period, skill_rows)
 from job_agent.documents.evidence import select_evidence
 from job_agent.documents.factcheck import check_claims, check_text
-from job_agent.documents.layout import (ATS, MIN_BODY_PT, MODERN, LayoutReport,
+from job_agent.documents.layout import (ATS, MAX_COMFORTABLE_FILL, MIN_BODY_PT,
+                                        MODERN, TIER_NAMES, LayoutReport,
                                         assess_pages, get_style, pdf_page_count)
 from job_agent.documents.pipeline import generate_package
 from job_agent.documents.render_docx import read_docx_text, render_cv
@@ -145,6 +146,30 @@ def test_compaction_is_tried_before_a_second_page_is_accepted(tmp_path):
     assert rendered.layout.pages >= 1
 
 
+def test_the_roomiest_tier_that_fits_comfortably_is_chosen(tmp_path):
+    """Not the tightest that fits, and not one packed to the bottom margin."""
+    cv = build_cv(evidence_for(), role="Trainee IT (m/w/d)")
+    rendered = render_cv_pdf(cv, contact(), tmp_path / "cv.pdf", style=ATS)
+    assert rendered.layout.pages == 1
+    assert rendered.layout.last_page_fill <= MAX_COMFORTABLE_FILL, (
+        "a page with no slack spills when Word repaginates the DOCX: "
+        + rendered.layout.describe())
+    assert rendered.layout.attempts[0] == "regular:2p"
+    assert len(rendered.layout.attempts) > 1, "the ladder must have been walked"
+
+
+def test_the_tier_ladder_runs_roomiest_to_tightest():
+    tiers = MODERN.tiers()
+    assert [tier.tier for tier in tiers] == list(TIER_NAMES)
+    sizes = [tier.body_pt for tier in tiers]
+    assert sizes == sorted(sizes, reverse=True), "each tier is tighter than the last"
+    assert min(sizes) >= MIN_BODY_PT, "legibility floor is never crossed"
+    assert max(sizes) <= 11.0, "body text stays in the 10-11pt range"
+    spacing = [tier.section_before for tier in tiers]
+    assert spacing == sorted(spacing, reverse=True)
+    assert MODERN.compacted(0) is MODERN
+
+
 def test_a_cv_that_cannot_fit_keeps_the_readable_layout(tmp_path):
     """Requirement 15: a balanced long CV beats unreadably small text."""
     section = CvSection(heading="Projekte", entries=tuple(
@@ -235,6 +260,19 @@ def test_the_letter_subject_uses_the_printable_role():
     letter = deterministic_letter(evidence_for(), company="Finanz Informatik",
                                   role="Trainee IT (m/w/d)")
     assert letter.subject == "Bewerbung als Trainee IT"
+    assert "Trainee IT (m/w/d)" not in letter.text, \
+        "the body must spell the role the way the subject line does"
+    assert "als Trainee IT bei Finanz Informatik" in letter.text
+
+
+def test_the_letter_lists_requirements_grammatically():
+    """"Themen Java, Linux deckt ... ab" was wrong in both list and verb."""
+    letter = deterministic_letter(evidence_for(), company="Finanz Informatik",
+                                  role="Trainee IT (m/w/d)")
+    body = letter.text
+    assert "Themen Java und Linux ab" in body
+    assert "deckt diese Projektarbeit ab" not in body
+    assert "Diese Projektarbeit deckt" in body
 
 
 # --- 3. consistent German ------------------------------------------------

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "job-application-agent"
-version = "0.13.0"
+version = "0.13.1"
 description = "Human-approved job discovery agent: skill-based multi-source search, evidence-based AI matching, no automatic submission"
 readme = "README.md"
 requires-python = ">=3.11"

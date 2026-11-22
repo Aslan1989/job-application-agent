@@ -23,14 +23,19 @@ flowchart TD
   CV --> FCC{factcheck.check_claims}
   FCC -->|any failure| STOP[refuse: evidence-selection bug]
   CONTACT[(data/contact.json — local only)] --> DOCX
-  CV --> DOCX[render_docx: ATS-friendly DOCX]
+  PHOTO[(data/profile_photo.jpg — local only)] --> DOCX
+  CV --> STYLE{layout: modern / ats}
+  STYLE --> DOCX[render_docx]
   USE --> DOCX
   TPL --> DOCX
   DOCX --> PDF{soffice installed?}
   PDF -->|yes| CONV[convert the DOCX]
   PDF -->|no| DIRECT[render_pdf: direct ReportLab]
-  CONV --> REVIEW[review.txt + review.json]
-  DIRECT --> REVIEW
+  CONV --> PAGES[verify page count]
+  DIRECT --> PAGES
+  PAGES -->|over one page| TIER[retry at a tighter density tier]
+  TIER --> PAGES
+  PAGES --> REVIEW[review.txt + review.json]
   REVIEW --> HUMAN{Human review}
   HUMAN --> NOSUB[No submission path exists]
 ```
@@ -43,8 +48,9 @@ flowchart TD
 | `documents/contact.py` | Local-only contact details. Never imported by the prompt builder. |
 | `documents/content.py` | CV assembly, letter prompt, deterministic letter fallback. |
 | `documents/factcheck.py` | Validates generated prose against the evidence allowlist. |
-| `documents/render_docx.py` | ATS-friendly DOCX via python-docx. |
-| `documents/render_pdf.py` | LibreOffice conversion when available, else ReportLab. |
+| `documents/layout.py` | The `modern`/`ats` styles, density tiers, page verification. |
+| `documents/render_docx.py` | Style-aware DOCX via python-docx. |
+| `documents/render_pdf.py` | LibreOffice conversion when available, else ReportLab; measures pagination. |
 | `documents/pipeline.py` | Orchestration + the review report. |
 | `documents/drive.py` | Opt-in Drive upload. Inert without a new OAuth scope. |
 
@@ -138,9 +144,62 @@ switches to converting the DOCX instead — one source document, so the PDF
 cannot drift from the editable file. No code change is needed; the converter is
 detected per run and the review report says which route was used.
 
-The DOCX is the editable deliverable either way. It is ATS-friendly by
-omission: no tables, text boxes, columns, images, headers or footers, real
-heading styles, one font, left-aligned, plain hyphen bullets.
+The DOCX is the editable deliverable either way.
+
+## The two CV variants
+
+`--style modern` (default) or `--style ats`, or `--style both` to write both in
+one run. The first style named keeps the plain filename and is the only one a
+`--write` run records in the tracker; the other is written beside it with an
+`-ATS` suffix.
+
+| | `modern` | `ats` |
+|---|---|---|
+| For | a human reader at the employer | an applicant tracking system |
+| Photo | optional, from `data/profile_photo.jpg` | never |
+| Colour | dark navy name, headings and rules | near-black only |
+| Tables | one borderless header table, when a photo is present | none |
+| Body text | 10–10.5 pt | 10.5–11 pt |
+
+`ats` is ATS-friendly by omission: no tables, text boxes, columns, images,
+headers or footers; real heading styles, one font, left-aligned, plain hyphen
+bullets. `modern` relaxes only the table and image rules, and only in the
+header. Both consume the same `CvContent`, so a style is presentation and can
+never add or drop a fact — a test asserts the two carry the identical set of
+words.
+
+## The Bewerbungsfoto
+
+Saved by the user at `data/profile_photo.jpg` (`.jpeg`/`.png` also accepted),
+git-ignored, and loaded only by the renderers. It hangs off
+`ContactDetails.photo_path` for the same reason the phone number does:
+`content.py` builds every model prompt and does not import `contact.py`, so
+neither can reach a prompt or a log. `--no-photo` omits it.
+
+The image is **never generated, cropped or retouched**. The only operation is a
+uniform scale to a fixed height. A photo that is too small, unreadable or not a
+JPEG/PNG is refused with a reason; a landscape photo is used uncropped and the
+report says there will be space beside it.
+
+## One page, verified
+
+A junior or trainee CV is expected on one A4 page. `render_cv_pdf` builds the
+document, reads the page count back off the finished file and, if it spilled,
+retries at a tighter density tier — `regular`, then `snug`, then `compact`.
+It stops at the roomiest tier that fits one page *with slack at the bottom*,
+because the DOCX is repaginated by Word in Calibri rather than by ReportLab in
+Helvetica, and a page with no slack is the one that spills in the editable copy.
+
+Tiers scale spacing, not legibility: body text gives up at most half a point
+and never drops below 10 pt. If no tier wins a single page the roomiest layout
+is restored — a balanced two-page CV beats unreadably small text — and the
+report warns. It also warns when a last page is under 18% full, which is the
+"accidental second page" the old output produced, and when a CV exceeds two
+pages at all.
+
+The review report prints the measurement for every style, e.g.
+`CV layout 'modern' (compact spacing, reportlab): 1 page(s), last page 95% full
+[tried regular:2p, snug:2p, compact:1p]`.
 
 ## Manual review checklist
 
@@ -198,12 +257,18 @@ A vacancy whose advert is not in the cache is skipped with that message; run
 
 ## Known limitations
 
-- Project and employment descriptions are English in the profile. A German CV
-  shows them as-is and the report flags it; nothing is machine-translated.
+- Nothing is machine-translated at render time. German documents use the
+  profile's own `evidence_points_de`, `background_de`, `title_de` fields; where
+  one is absent the English text is shown as-is and the report flags it. The
+  fix is always a profile edit, never a translation in code.
 - Python/OSMnx evidence is private-repository only, so it is excluded from
   documents. Making that repository public, or adding `cv_` evidence, would
   make Python presentable.
-- No LibreOffice here, so PDFs are rendered rather than converted.
+- No LibreOffice here, so PDFs are rendered rather than converted. This also
+  means the DOCX page count cannot be verified locally; only the PDF's is. Open
+  the DOCX once in Word or LibreOffice before sending.
+- No `data/profile_photo.jpg` on this machine yet, so the `modern` CV currently
+  renders without a photo and the report says so.
 - The fact checker recognises known fabrication patterns. It is a safety net,
   not a substitute for reading the draft.
 - Document generation is **not** part of the daily runner and will not be added

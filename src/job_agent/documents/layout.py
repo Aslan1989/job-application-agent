@@ -40,10 +40,21 @@ MIN_BODY_PT = 10.0
 # accident rather than a layout. The current output's second page was ~12%.
 MIN_LAST_PAGE_FILL = 0.18
 
+# A single page filled past this has its last line against the bottom margin.
+# It is a real one-page PDF, but the DOCX is repaginated by Word in Calibri
+# rather than by ReportLab in Helvetica, so a page with no slack is the one
+# that spills in the editable copy. When a tighter tier also fits, prefer it.
+MAX_COMFORTABLE_FILL = 0.97
+
 # Junior and trainee applications are expected on one page, and two is the
 # absolute ceiling.
 PREFERRED_PAGES = 1
 MAX_PAGES = 2
+
+# Density tiers, roomiest first. `CvStyle.compacted(level)` interpolates the
+# spacing deltas across them, so the renderer can take the loosest layout that
+# still fits one page rather than always falling to the tightest.
+TIER_NAMES: tuple[str, ...] = ("regular", "snug", "compact")
 
 NAVY = "#1F3A5F"
 NAVY_DEEP = "#14283F"
@@ -93,30 +104,42 @@ class CvStyle:
     def is_ats(self) -> bool:
         return self.name == "ats"
 
-    def compacted(self) -> "CvStyle":
-        """The same style, one density tier tighter.
+    def compacted(self, level: int = 2) -> "CvStyle":
+        """The same style at a tighter density tier.
 
-        Spacing shrinks and the headline comes down a little; body text loses
-        half a point and stops at `MIN_BODY_PT`. Nothing else changes, so a
-        compacted CV is the same document, not a smaller-print one.
+        `level` 1 is `snug` and 2 is `compact`; the deltas scale with it, so a
+        document that overflows by a little keeps most of its breathing room
+        instead of jumping straight to the tightest layout. Spacing is what
+        shrinks. Body text gives up at most half a point and never goes below
+        `MIN_BODY_PT`, so a compacted CV is the same document at the same
+        readable size, not a smaller-print one.
         """
+        if level <= 0:
+            return self
+        step = min(int(level), len(TIER_NAMES) - 1)
+        share = step / (len(TIER_NAMES) - 1)
         return replace(
             self,
-            tier="compact",
-            body_pt=max(MIN_BODY_PT, self.body_pt - 0.5),
-            name_pt=self.name_pt - 2.0,
-            headline_pt=self.headline_pt - 0.5,
-            heading_pt=self.heading_pt - 0.5,
-            leading=max(1.12, self.leading - 0.06),
-            space_after=max(1.5, self.space_after - 1.0),
-            section_before=max(6.0, self.section_before - 3.5),
-            section_after=max(2.0, self.section_after - 1.0),
-            entry_before=max(2.5, self.entry_before - 2.0),
-            bullet_after=max(0.5, self.bullet_after - 0.5),
-            margin_top=max(12.0, self.margin_top - 3.0),
-            margin_bottom=max(12.0, self.margin_bottom - 3.0),
-            photo_height_mm=max(34.0, self.photo_height_mm - 5.0),
+            tier=TIER_NAMES[step],
+            body_pt=max(MIN_BODY_PT, self.body_pt - 0.5 * share),
+            name_pt=self.name_pt - 2.0 * share,
+            headline_pt=self.headline_pt - 0.5 * share,
+            heading_pt=self.heading_pt - 0.5 * share,
+            leading=max(1.12, self.leading - 0.06 * share),
+            space_after=max(1.5, self.space_after - 1.0 * share),
+            section_before=max(6.0, self.section_before - 3.5 * share),
+            section_after=max(2.0, self.section_after - 1.0 * share),
+            entry_before=max(2.5, self.entry_before - 2.0 * share),
+            bullet_after=max(0.5, self.bullet_after - 0.5 * share),
+            margin_top=max(12.0, self.margin_top - 3.0 * share),
+            margin_bottom=max(12.0, self.margin_bottom - 3.0 * share),
+            photo_height_mm=max(34.0, self.photo_height_mm - 5.0 * share),
         )
+
+    def tiers(self) -> tuple["CvStyle", ...]:
+        """This style from roomiest to tightest. The first that fits wins."""
+        return (self,) + tuple(self.compacted(level)
+                               for level in range(1, len(TIER_NAMES)))
 
 
 MODERN = CvStyle(name="modern")
