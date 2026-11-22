@@ -22,8 +22,9 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Mapping, Sequence
 
-from .evidence import (TRACK_TO_PROFILE, EvidenceSelection, _fold,
-                       display_requirement, localise)
+from .evidence import (REQUIREMENT_SIGNALS, TRACK_TO_PROFILE,
+                       EvidenceSelection, _fold, display_requirement,
+                       localise)
 
 MAX_LETTER_CHARS = 2600  # Roughly one page of body text.
 
@@ -237,6 +238,8 @@ TRACK_EMPHASIS: dict[str, tuple[str, ...]] = {
     "unclassified": (),
 }
 EMPHASIS_BONUS = (4, 2)
+# A fragment scores this much or more only when the advert named it.
+_CUE_SCORE = 3
 
 # Fallback category for a whole bundle, by its leading term, used only when a
 # fragment is not in FRAGMENT_CATEGORY.
@@ -266,6 +269,46 @@ def _fallback_category(name: str) -> str:
     return "other"
 
 
+# Equivalences used for RANKING ONLY. They never create a claim: the printed
+# text is always the profile's own, and these only decide what a vacancy sees
+# first. "Unix" and "Linux" are the pair that mattered -- a datacenter advert
+# asks for Linux, and the Minishell evidence says Unix, so the single most
+# relevant systems project ranked below a PHP login form.
+RANKING_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "linux": ("unix",),
+    "unix": ("linux",),
+    "rest": ("http",),
+    # "sql" is deliberately NOT expanded to mysql/mariadb: the fragment match
+    # is substring-based, so "sql" already hits "MySQL", and expanding it
+    # double-counted one technology -- enough to lift a PHP login form above
+    # the Spring Boot project on a Java vacancy.
+}
+
+
+def cue_fragments(requirements: Sequence[str]) -> list[str]:
+    """What the advert asked for, as *skill* vocabulary.
+
+    `matched_requirements` holds the advert's own words ("Datenbanken", "KI",
+    "Scripting") or an assessment's matched skills. Matching those raw against
+    profile fragments missed almost everything: "KI" never raised "RAG" and
+    "Datenbanken" never raised "SQL", so a CV could not respond to the advert
+    in front of it. Each requirement is therefore expanded through
+    `REQUIREMENT_SIGNALS` -- the same table `select_evidence` uses -- and the
+    raw word is kept too, for an assessment that names a technology directly.
+    """
+    found: list[str] = []
+    for item in requirements:
+        raw = _fold(item).strip()
+        if not raw:
+            continue
+        expanded = [raw, *REQUIREMENT_SIGNALS.get(raw, ())]
+        for fragment in expanded:
+            for term in (fragment, *RANKING_SYNONYMS.get(fragment, ())):
+                if term and term not in found:
+                    found.append(term)
+    return found
+
+
 def _cue_matches(fragment: str, cue: str) -> bool:
     """Whether an advert cue names this technology.
 
@@ -291,20 +334,36 @@ def _fragment_key(item: tuple[int, int, int, int, str]) -> tuple[int, int, int, 
     return (-item[0], item[1], item[2], item[3])
 
 
-def skill_rows(evidence: EvidenceSelection, language: str, *,
-               track: str = "") -> tuple[tuple[str, str], ...]:
-    """Group the selected skills into compact, vacancy-ordered category rows.
+# The skills inventory in the profile is complete and never narrowed. One CV
+# is a selection from it: a datacenter vacancy has no use for a JUnit row, and
+# a Java vacancy has none for a Konfigurationsparser row. `languages` is
+# always kept, so C and C++ appear on every CV whatever the role.
+MAX_CATEGORIES = 5
+PROTECTED_CATEGORIES = ("languages",)
 
-    Nothing is discarded: every evidenced skill fragment is printed, whatever
-    the vacancy. What the vacancy changes is the *order* -- which category
-    leads and which technology comes first inside it -- so a C/C++ advert sees
-    systems programming first and a Java advert sees backend first, from one
-    unchanged inventory.
+
+def skill_rows(evidence: EvidenceSelection, language: str, *,
+               track: str = "",
+               max_categories: int = MAX_CATEGORIES) -> tuple[tuple[str, str], ...]:
+    """Group the selected skills into compact, vacancy-specific category rows.
+
+    The vacancy decides three things, not just one:
+
+    1. **Which** categories appear. The least relevant are left off, up to
+       `max_categories`, so two different adverts produce genuinely different
+       content rather than the same seven rows reshuffled. `languages` is
+       protected, so C and C++ are never among the dropped.
+    2. Which category leads, from the advert's own requirement cues plus the
+       career track's emphasis.
+    3. Which technology leads inside a category.
+
+    Nothing is invented and nothing is rewritten: every printed fragment comes
+    from a profile skill, and the profile keeps the full inventory.
     """
     labels = CATEGORY_LABELS.get(language, CATEGORY_LABELS["de"])
     chosen_track = track or evidence.track
     wanted = set(TRACK_TO_PROFILE.get(chosen_track, ()))
-    cues = [_fold(item) for item in evidence.matched_requirements if str(item).strip()]
+    cues = cue_fragments(evidence.matched_requirements)
 
     # One entry per fragment: (score, borrowed?, bundle index, position, text).
     # "borrowed" marks a fragment whose category is not its bundle's own, like
@@ -316,7 +375,13 @@ def skill_rows(evidence: EvidenceSelection, language: str, *,
         home = _fallback_category(skill.name)
         # The English fragment is the key for categorisation and for the fact
         # checker; only the printed half is localised. See SkillEvidence.aligned.
-        for position, (key, shown) in enumerate(skill.aligned(language)):
+        aligned = skill.aligned(language)
+        if skill.private_backed:
+            # No citable project, so only the headline technology is listed:
+            # "Python", not its niche libraries. The capability is real; an
+            # unverifiable tool list on top of it is noise.
+            aligned = aligned[:1]
+        for position, (key, shown) in enumerate(aligned):
             folded = _fold(key)
             category = FRAGMENT_CATEGORY.get(folded, home)
             score = bundle_bonus + (3 if any(_cue_matches(folded, cue)
@@ -330,7 +395,14 @@ def skill_rows(evidence: EvidenceSelection, language: str, *,
         bonus = next((EMPHASIS_BONUS[position]
                       for position, name in enumerate(emphasis[:len(EMPHASIS_BONUS)])
                       if name == category), 0)
-        rank = max(item[0] for item in items) + bonus
+        # Rank = the best single technology, plus HOW MANY of this category's
+        # technologies the advert actually named, plus the track emphasis. The
+        # middle term matters: a single fragment score saturates at "cue hit
+        # plus track match", so without it a datacenter advert naming Docker,
+        # NGINX, Bash and Git scored its DevOps row no higher than a category
+        # it mentioned once.
+        hits = sum(1 for item in items if item[0] >= _CUE_SCORE)
+        rank = max(item[0] for item in items) + hits + bonus
         # Duplicates across bundles (PHP appears twice) collapse to the best.
         best: dict[str, tuple[int, int, int, int, str]] = {}
         for item in items:
@@ -354,6 +426,18 @@ def skill_rows(evidence: EvidenceSelection, language: str, *,
                      "  \u00b7  ".join(item[4] for item in ordered)))
 
     rows.sort(key=lambda item: (-item[0], item[1]))
+    if max_categories and len(rows) > max_categories:
+        protected = {labels.get(name, name) for name in PROTECTED_CATEGORIES}
+        kept = [row for row in rows[:max_categories]]
+        kept_labels = {row[2] for row in kept}
+        # A protected category that fell outside the cut takes the last slot,
+        # so a Java-focused CV still shows C and C++.
+        for row in rows[max_categories:]:
+            if row[2] in protected and row[2] not in kept_labels:
+                kept[-1] = row
+                kept.sort(key=lambda item: (-item[0], item[1]))
+                break
+        rows = kept
     return tuple((label, value) for _, _, label, value in rows)
 
 
@@ -363,7 +447,7 @@ _ROLE_NOISE = re.compile(
     r"\(\s*(?:m\s*[/|]\s*w\s*[/|]\s*[dx]|w\s*[/|]\s*m\s*[/|]\s*[dx]|"
     r"m\s*[/|]\s*f\s*[/|]\s*[dx]|all\s+genders|gn|d\s*[/|]\s*m\s*[/|]\s*w|"
     r"m\s*[/|]\s*w\s*[/|]\s*d\s*[/|]\s*\w+)\s*\)"
-    r"|\bm\s*[/|]\s*w\s*[/|]\s*[dx]\b"
+    r"|\b[mwfdx]\s*[/|]\s*[mwfdx]\s*[/|]\s*[mwfdx]\b"
     r"|\(\s*[mwdfxa]\s*[/|]\s*[mwdfxa](?:\s*[/|]\s*[mwdfxa])*\s*\)",
     re.I)
 _MONTH_KEY = re.compile(r"^(\d{4})-(\d{1,2})$")
@@ -467,6 +551,20 @@ def build_cv(evidence: EvidenceSelection, *, role: str = "",
 
     skills = CvSection(heading=labels["skills"], rows=skill_rows(evidence, language))
 
+    cues = [_fold(item) for item in evidence.matched_requirements if str(item).strip()]
+
+    def ranked_points(project) -> tuple[str, ...]:
+        """The project's description lines, most relevant to this advert first."""
+        points = list(project.described(language))
+        if len(points) < 2 or not cues:
+            return tuple(points)
+        def hits(line: str) -> int:
+            folded = _fold(line)
+            return sum(1 for cue in cues
+                       if re.search(r"(?<![a-z0-9+#])" + re.escape(cue)
+                                    + r"(?![a-z0-9+#])", folded))
+        return tuple(sorted(points, key=lambda line: -hits(line)))
+
     project_entries = [
         # "github.com/<owner>/<repo>" rather than the full https URL: it is
         # how a CV conventionally cites a repository, it is unambiguous, and
@@ -474,7 +572,7 @@ def build_cv(evidence: EvidenceSelection, *, role: str = "",
         # occupying a line of its own. The review report keeps the full URL.
         CvEntry(title=project.name,
                 link=f"github.com/{project.repository}" if project.repository else "",
-                bullets=project.described(language))
+                bullets=ranked_points(project))
         for project in evidence.projects[:max(1, max_projects)]
     ]
     projects = CvSection(heading=labels["projects"], entries=tuple(project_entries))
@@ -491,9 +589,12 @@ def build_cv(evidence: EvidenceSelection, *, role: str = "",
             bullets=(described,) if described else ()))
     experience = CvSection(heading=labels["experience"], entries=tuple(work_entries))
 
+    # `select_evidence` has already sorted these newest-first.
     education_entries = [
         CvEntry(title=item.titled(language), subtitle=item.institution,
-                period=format_dates(item.dates, language))
+                period=format_dates(item.dates, language),
+                bullets=(item.shown_note(language),) if item.shown_note(language)
+                else ())
         for item in evidence.education
     ]
     education = CvSection(heading=labels["education"], entries=tuple(education_entries))
@@ -658,6 +759,16 @@ def build_letter(paragraphs: Sequence[str], evidence: EvidenceSelection, *,
     )
 
 
+def _join_list(names: Sequence[str], joiner: str) -> str:
+    """"A, B und C" rather than "A, B, C"."""
+    items = [str(name) for name in names if str(name).strip()]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + f" {joiner} " + items[-1]
+
+
 def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str,
                          findings: Sequence[str] = ()) -> LetterContent:
     """A truthful letter assembled from evidence, with no model involved.
@@ -668,7 +779,20 @@ def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str
     language = evidence.language if evidence.language in LETTER_LABELS else "de"
     focus = _focus(evidence.track, language)
     printable_role = clean_role(role) or role
-    top_skills = [skill.name for skill in evidence.skills[:4]]
+    # The headline technology of each of the strongest skills, in the
+    # document's language. Whole bundles read badly inside a comma list
+    # ("RAG / Embeddings / Ollama, Docker / Docker Compose / NGINX / PHP-FPM,
+    # ...") and printed the English "Processes" in a German letter.
+    top_skills: list[str] = []
+    for skill in evidence.skills:
+        aligned = skill.aligned(language)
+        if not aligned:
+            continue
+        lead = aligned[0][1]
+        if lead not in top_skills:
+            top_skills.append(lead)
+        if len(top_skills) >= 6:
+            break
     project = evidence.projects[0] if evidence.projects else None
     second = evidence.projects[1] if len(evidence.projects) > 1 else None
     def listed(items: Sequence[str], joiner: str) -> str:
@@ -696,7 +820,8 @@ def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str
                  f"{company}. Mein Schwerpunkt liegt auf {focus}; meine "
                  "praktischen Kenntnisse stammen aus eigenen Projekten und aus "
                  "meiner Ausbildung.")
-        technical = "Meine technischen Schwerpunkte sind " + ", ".join(top_skills) + "."
+        technical = ("Meine technischen Schwerpunkte sind "
+                     + _join_list(top_skills, "und") + ".")
         if project is not None:
             stack = tech_list(project, "und")
             technical += (f" Im Projekt {project.name} habe ich"
@@ -727,7 +852,8 @@ def deterministic_letter(evidence: EvidenceSelection, *, company: str, role: str
         first = (f"I am applying for the position of {printable_role} at "
                  f"{company}. My focus is {focus}, built through personal "
                  "projects and my programming education.")
-        technical = "My technical focus areas are " + ", ".join(top_skills) + "."
+        technical = ("My technical focus areas are "
+                     + _join_list(top_skills, "and") + ".")
         if project is not None:
             stack = tech_list(project, "and")
             technical += (f" In my {project.name} project I worked"

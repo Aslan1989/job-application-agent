@@ -411,7 +411,7 @@ def render_cv_pdf(cv: CvContent, contact: ContactDetails, path: Path | str, *,
     for candidate in ladder:
         pages, fill, clipped = _build_once(cv, contact, candidate, target)
         used = candidate
-        attempts.append(f"{candidate.tier}:{pages}p")
+        attempts.append(f"{candidate.tier}:{pages}p@{fill * 100:.0f}%")
         if clipped:
             break
         if 0 < pages <= PREFERRED_PAGES:

@@ -336,10 +336,14 @@ def skill_atoms(evidence: EvidenceSelection) -> frozenset[str]:
     """
     atoms: set[str] = set()
     for skill in evidence.skills:
-        for fragment in str(skill.name).split("/"):
-            folded = _fold(fragment).strip()
-            if folded:
-                atoms.add(folded)
+        # Both spellings: the profile's English record and its `name_de`, which
+        # is what a German CV prints. Neither widens what may be claimed -- the
+        # two name the same evidenced technologies.
+        for name in (skill.name, getattr(skill, "name_de", "")):
+            for fragment in str(name or "").split("/"):
+                folded = _fold(fragment).strip()
+                if folded:
+                    atoms.add(folded)
     return frozenset(atoms)
 
 
@@ -366,6 +370,12 @@ def check_claims(claims: Iterable[str], evidence: EvidenceSelection) -> FactChec
     for item in evidence.education:
         allowed_points |= {_fold(item.title), _fold(item.institution),
                            _fold(item.dates)}
+        # A CV-displayable education note, such as the ZAB recognition. The
+        # internal `note` is deliberately NOT allowed: it is an instruction to
+        # the generator, not text that may appear in a document.
+        allowed_points |= {_fold(getattr(item, "title_de", "")),
+                           _fold(getattr(item, "cv_note_de", "")),
+                           _fold(getattr(item, "cv_note_en", ""))}
     allowed_points.discard("")
     for claim in claims:
         folded = _fold(claim)

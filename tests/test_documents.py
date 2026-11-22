@@ -463,7 +463,7 @@ def test_docx_and_pdf_are_written_and_readable(tmp_path):
     assert "Test Candidate" in cv_text
     # The profile's "PHP 8 / OOP / PDO" bundle is printed as its individual
     # technologies, each under its own category.
-    for technology in ("PHP 8", "OOP", "PDO"):
+    for technology in ("PHP 8", "Objektorientierung", "PDO"):
         assert technology in cv_text
     assert "DokuChat" in cv_text
     letter_text = read_docx_text(package.letter_docx)

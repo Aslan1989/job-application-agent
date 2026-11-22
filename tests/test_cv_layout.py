@@ -13,6 +13,8 @@ asserted here is what the user asked for and what must not regress:
 """
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -21,6 +23,7 @@ from job_agent.candidate_profile import load_candidate_profile
 from job_agent.documents.contact import (ContactDetails, find_photo, inspect_photo,
                                          load_contact)
 from job_agent.documents.content import (CATEGORY_LABELS, CATEGORY_ORDER,
+                                         MAX_CATEGORIES,
                                          CvContent, CvEntry, CvSection, build_cv,
                                          clean_role, deterministic_letter,
                                          format_dates, format_period, skill_rows)
@@ -176,8 +179,21 @@ def test_the_roomiest_tier_that_fits_comfortably_is_chosen(tmp_path):
     assert rendered.layout.last_page_fill <= MAX_COMFORTABLE_FILL, (
         "a page with no slack spills when Word repaginates the DOCX: "
         + rendered.layout.describe())
-    assert rendered.layout.attempts[0] == "regular:2p"
-    assert len(rendered.layout.attempts) >= 1
+    # The tier used is the first on the ladder that fits one page *with slack*.
+    # A tier that fits but fills the page to the edge is recorded and skipped,
+    # because the DOCX repaginates in Word and would spill.
+    def parse(attempt):
+        tier, _, rest = attempt.partition(":")
+        pages, _, fill = rest.partition("@")
+        return tier, int(pages.rstrip("p")), float(fill.rstrip("%")) / 100
+
+    walked = [parse(item) for item in rendered.layout.attempts if "@" in item]
+    comfortable = [tier for tier, pages, fill in walked
+                   if pages == 1 and fill <= MAX_COMFORTABLE_FILL]
+    assert comfortable, rendered.layout.describe()
+    assert rendered.layout.tier == comfortable[0], rendered.layout.describe()
+    assert [tier for tier, _, _ in walked] == list(TIER_NAMES[:len(walked)]), \
+        "the ladder must be walked roomiest-first"
 
 
 def test_the_tier_ladder_runs_roomiest_to_tightest():
@@ -292,9 +308,15 @@ def test_the_letter_lists_requirements_grammatically():
     letter = deterministic_letter(evidence_for(), company="Finanz Informatik",
                                   role="Trainee IT (m/w/d)")
     body = letter.text
-    assert "Themen Java und Linux ab" in body
-    assert "deckt diese Projektarbeit ab" not in body
-    assert "Diese Projektarbeit deckt" in body
+    assert "Diese Projektarbeit deckt" in body, body
+    assert "deckt diese Projektarbeit ab" not in body, "wrong verb agreement"
+    found = re.search(r"Diese Projektarbeit deckt[^.]*\.", body)
+    assert found, body
+    sentence = found.group(0)
+    assert sentence.endswith(" ab."), f"the verb must close the clause: {sentence}"
+    if "," in sentence:
+        assert " und " in sentence, \
+            f"a list must join its last item with 'und': {sentence}"
 
 
 # --- 3. consistent German ------------------------------------------------
@@ -394,18 +416,20 @@ def test_skills_are_grouped_into_compact_categories():
     skills = next(section for section in cv.sections
                   if section.heading == "Technische Kenntnisse")
     assert skills.rows and not skills.bullets, "skills are rows, not a long list"
-    assert len(skills.rows) <= len(CATEGORY_ORDER), "categories must stay compact"
+    assert len(skills.rows) <= MAX_CATEGORIES, "one CV is a selection, not the lot"
     labels = [label for label, _ in skills.rows]
     assert len(labels) == len(set(labels))
     assert set(labels) <= set(CATEGORY_LABELS["de"].values())
 
-    # Every technology the profile evidences still appears, verbatim, whatever
-    # the vacancy. Nothing is dropped for being off-focus.
-    printed = " ".join(value for _, value in skills.rows)
+    # Uncapped, every technology the profile evidences is placed and printed.
+    # The cap is what makes one CV vacancy-specific; it never shrinks the
+    # inventory, which lives in the profile.
+    printed = " ".join(value for _, value in skill_rows(evidence, "de",
+                                                        max_categories=0))
     for skill in evidence.skills:
-        for fragment in skill.name.split("/"):
-            assert fragment.strip() in printed, \
-                f"{fragment.strip()} was lost in grouping"
+        shown = skill.aligned("de")[:1] if skill.private_backed else skill.aligned("de")
+        for _, fragment in shown:
+            assert fragment in printed, f"{fragment} was lost in grouping"
 
 
 def test_c_and_cpp_survive_a_java_or_php_vacancy():
@@ -414,20 +438,30 @@ def test_c_and_cpp_survive_a_java_or_php_vacancy():
                           (PHP_ADVERT, "php_web"),
                           (JAVA_ADVERT, "java_backend"),
                           (AI_ADVERT, "ai_engineering")]:
-        rows = skill_rows(evidence_for(advert, track=track), "de", track=track)
+        evidence = evidence_for(advert, track=track)
+        rows = skill_rows(evidence, "de", track=track)
         printed = " ".join(value for _, value in rows)
-        for technology in ("C", "C++", "Linux", "Processes", "HTTP",
-                           "TCP Sockets", "Configuration Parsing"):
+        # `languages` is protected, so these survive every vacancy however it
+        # is ranked -- that is the whole point of the protection.
+        for technology in ("C", "C++"):
             assert technology in printed, \
                 f"{technology} was discarded for a {track} vacancy"
+        # And the rest of the inventory is never lost, only deselected.
+        uncapped = " ".join(value for _, value in
+                            skill_rows(evidence, "de", track=track, max_categories=0))
+        for technology in ("Linux", "Prozesse und Pipes", "HTTP", "TCP-Sockets",
+                           "Konfigurationsparser"):
+            assert technology in uncapped, f"{technology} left the inventory"
 
 
 def test_grouping_invents_no_competency():
     """Every printed item is a technology the profile's own skills name."""
     evidence = evidence_for()
-    allowed = {fragment.strip() for skill in evidence.skills
-               for fragment in skill.name.split("/") if fragment.strip()}
-    for _, value in skill_rows(evidence, "de"):
+    allowed = {fragment.strip()
+               for skill in evidence.skills
+               for name in (skill.name, skill.name_de)
+               for fragment in str(name).split("/") if fragment.strip()}
+    for _, value in skill_rows(evidence, "de", max_categories=0):
         for item in value.split("  ·  "):
             assert item in allowed, f"'{item}' is not a profile technology"
 
@@ -435,12 +469,13 @@ def test_grouping_invents_no_competency():
 def test_every_profile_fragment_has_a_category():
     """An unmapped technology must fall back, never vanish."""
     evidence = evidence_for()
-    placed = {item for _, value in skill_rows(evidence, "de")
-              for item in value.split("  ·  ")}
+    rows = skill_rows(evidence, "de", max_categories=0)
+    placed = {item for _, value in rows for item in value.split("  ·  ")}
     for skill in evidence.skills:
-        for fragment in skill.name.split("/"):
-            assert fragment.strip() in placed, f"{fragment} was not placed"
-    assert "other" not in [label for label, _ in skill_rows(evidence, "de")], \
+        shown = skill.aligned("de")[:1] if skill.private_backed else skill.aligned("de")
+        for _, fragment in shown:
+            assert fragment in placed, f"{fragment} was not placed"
+    assert CATEGORY_LABELS["de"]["other"] not in [label for label, _ in rows], \
         "every technology in this profile has an explicit category"
 
 
@@ -449,12 +484,13 @@ def test_every_profile_fragment_has_a_category():
      ["Systemprogrammierung & Netzwerke", "Programmiersprachen"]),
     (JAVA_ADVERT, "java_backend",
      ["Backend & Frameworks", "Programmiersprachen"]),
-    # A PHP vacancy leads with the language, not with "Backend & Frameworks":
-    # the advert names PHP 8 directly, and this profile's backend bundle is
-    # Spring-centric, so leading with it would put Java work first in a PHP
-    # application. The advert outranks the track emphasis by design.
+    # A PHP vacancy leads with the language and then the databases it names,
+    # not with "Backend & Frameworks": the advert asks for PHP 8, SQL, MariaDB
+    # and PHPUnit, while this profile's backend bundle is Spring-centric, so
+    # leading with it would put Java work first in a PHP application. The
+    # advert's own technologies outrank the track emphasis by design.
     (PHP_ADVERT, "php_web",
-     ["Programmiersprachen", "Backend & Frameworks"]),
+     ["Programmiersprachen", "Datenbanken"]),
     (AI_ADVERT, "ai_engineering", ["KI & LLM", "DevOps & Werkzeuge"]),
     (TRAINEE_ADVERT, "graduate_entry",
      ["Programmiersprachen", "Systemprogrammierung & Netzwerke"]),
@@ -474,19 +510,30 @@ def test_a_systems_vacancy_leads_with_systems_programming():
     assert rows[1][1].split("  ·  ")[:2] == ["C", "C++"]
 
 
-def test_the_same_inventory_is_reordered_not_rewritten():
-    """Two vacancies see the same technologies in a different order."""
-    cpp = skill_rows(evidence_for(CPP_ADVERT, track="cpp_systems"), "de",
-                     track="cpp_systems")
-    java = skill_rows(evidence_for(JAVA_ADVERT, track="java_backend"), "de",
-                      track="java_backend")
+def test_two_vacancies_get_genuinely_different_skill_content():
+    """Adaptation is selection, not just reshuffling the same rows.
+
+    The profile inventory is untouched -- uncapped, both vacancies can still
+    reach every technology -- but the CV each one gets differs in *content*.
+    """
+    cpp_evidence = evidence_for(CPP_ADVERT, track="cpp_systems")
+    java_evidence = evidence_for(JAVA_ADVERT, track="java_backend")
+    cpp = skill_rows(cpp_evidence, "de", track="cpp_systems")
+    java = skill_rows(java_evidence, "de", track="java_backend")
 
     def technologies(rows):
         return {item for _, value in rows for item in value.split("  ·  ")}
 
-    assert technologies(cpp) == technologies(java), "nothing may be dropped"
     assert [label for label, _ in cpp] != [label for label, _ in java], \
-        "but the order must respond to the vacancy"
+        "the categories shown must respond to the vacancy"
+    assert technologies(cpp) != technologies(java), \
+        "and so must the technologies, or this is only a reordering"
+    # Neither loses C/C++, and neither loses access to the full inventory.
+    for rows in (cpp, java):
+        assert {"C", "C++"} <= technologies(rows)
+    assert technologies(skill_rows(cpp_evidence, "de", max_categories=0)) == \
+        technologies(skill_rows(java_evidence, "de", max_categories=0)), \
+        "the inventory itself is the same; only the selection differs"
 
 
 def test_the_leading_technology_in_a_category_follows_the_vacancy():
@@ -501,18 +548,49 @@ def test_the_leading_technology_in_a_category_follows_the_vacancy():
 
 def test_a_bundles_technologies_stay_together_in_a_category():
     """A category reads as a list, not an interleaving of two skill bundles."""
-    rows = dict(skill_rows(evidence_for(), "de"))
+    rows = dict(skill_rows(evidence_for(), "de", max_categories=0))
     devops = rows["DevOps & Werkzeuge"].split("  ·  ")
     docker = [devops.index(name) for name in
               ("Docker", "Docker Compose", "NGINX", "PHP-FPM")]
     assert docker == sorted(docker) and max(docker) - min(docker) == 3
 
 
-def test_an_unevidenced_or_private_technology_is_never_categorised():
-    printed = " ".join(value for _, value in skill_rows(evidence_for(), "de"))
-    for forbidden in ("ABAP", "SAP", "OSMnx", "NetworkX", "Streamlit", "Python"):
+def test_an_unevidenced_technology_is_never_printed():
+    """Unevidenced is still unevidenced. SAP/ABAP has no evidence at all."""
+    printed = " ".join(value for _, value in
+                       skill_rows(evidence_for(), "de", max_categories=0))
+    for forbidden in ("ABAP", "SAP"):
         assert forbidden not in printed, \
-            f"{forbidden} has no public or CV evidence and must not be printed"
+            f"{forbidden} has no evidence of any kind and must not be printed"
+
+
+def test_a_privately_evidenced_skill_is_listed_but_never_cited():
+    """Python is evidenced by a real project the candidate keeps private.
+
+    Dropping it understated genuine ability. It is listed, the repository is
+    never named, its unverifiable helper libraries are left off, and it does
+    not enter a model prompt.
+    """
+    evidence = evidence_for()
+    python = next(skill for skill in evidence.skills
+                  if skill.name.startswith("Python"))
+    assert python.private_backed is True
+    assert python.sources == (), "a private repository is not a citable source"
+
+    printed = " ".join(value for _, value in
+                       skill_rows(evidence, "de", max_categories=0))
+    assert "Python" in printed, "a privately evidenced skill is still a skill"
+    for noise in ("OSMnx", "NetworkX", "Streamlit"):
+        assert noise not in printed, \
+            f"{noise} has no citable project; only the headline technology is listed"
+    for secret in ("greenroute", "GreenRoute", "webserv"):
+        assert secret not in printed, f"private repository '{secret}' disclosed"
+
+    # And it is absent from the only shape that may reach a model.
+    payload = json.dumps(evidence.to_prompt_payload(), ensure_ascii=False)
+    assert "Python" not in payload, \
+        "a skill with no citable provenance must not be offered to a model"
+    assert "greenroute" not in payload.casefold()
 
 
 def test_experience_is_not_labelled_non_technical():
@@ -732,3 +810,199 @@ def test_a_dry_run_still_writes_nothing(tmp_path):
     assert package.files == []
     assert package.alternates == {}
     assert list(tmp_path.iterdir()) == []
+
+
+# --- 8. German terminology, education order, ZAB recognition -------------
+
+
+@pytest.mark.parametrize("english,german", [
+    ("Processes", "Prozesse und Pipes"),
+    ("Configuration Parsing", "Konfigurationsparser"),
+    ("Security", "Spring Security"),
+    ("OOP", "Objektorientierung"),
+    ("TCP Sockets", "TCP-Sockets"),
+])
+def test_a_german_cv_prints_german_skill_terminology(english, german):
+    """The awkward English labels are gone, from the profile's own `name_de`."""
+    evidence = evidence_for()
+    printed = " ".join(value for _, value in
+                       skill_rows(evidence, "de", max_categories=0))
+    assert german in printed
+    assert english not in printed.split("  ·  "), \
+        f"the English label '{english}' is still being printed"
+
+
+def test_an_english_cv_keeps_the_english_skill_terminology():
+    english = select_evidence(
+        profile(), job_id="EN-1", role="Backend Engineer", company="ACME",
+        description="We need Java, Spring Boot, SQL, Docker and JUnit for our "
+                    "REST APIs. You will join an experienced engineering team.",
+        track="java_backend")
+    printed = " ".join(value for _, value in
+                       skill_rows(english, "en", max_categories=0))
+    assert "Spring Security" in printed or "Security" in printed
+    assert "Objektorientierung" not in printed
+    assert "Konfigurationsparser" not in printed
+
+
+def test_a_misaligned_german_name_falls_back_instead_of_mislabelling():
+    """An unaligned `name_de` would silently rename the wrong technology."""
+    from job_agent.documents.evidence import SkillEvidence
+
+    good = SkillEvidence(name="A / B / C", sources=("cv_x",), tracks=(),
+                         confidence="x", name_de="A / B-de / C-de")
+    assert good.named("de") == "A / B-de / C-de"
+    assert good.aligned("de") == (("A", "A"), ("B", "B-de"), ("C", "C-de"))
+
+    bad = SkillEvidence(name="A / B / C", sources=("cv_x",), tracks=(),
+                        confidence="x", name_de="A / B-de")
+    assert bad.named("de") == "A / B / C", "a mismatched pair must not be used"
+    assert bad.aligned("de") == (("A", "A"), ("B", "B"), ("C", "C"))
+
+    none = SkillEvidence(name="A / B", sources=("cv_x",), tracks=(), confidence="x")
+    assert none.named("de") == "A / B"
+
+
+def test_education_is_reverse_chronological_with_the_current_study_first():
+    evidence = evidence_for()
+    assert [item.started for item in evidence.education] == \
+        sorted((item.started for item in evidence.education), reverse=True)
+    cv = build_cv(evidence, role="Trainee IT")
+    education = next(section for section in cv.sections
+                     if section.heading == "Ausbildung")
+    titles = [entry.title for entry in education.entries]
+    assert titles[0] == "Software Engineering", titles
+    assert education.entries[0].subtitle == "42 Heilbronn"
+    assert titles[-1].startswith("Wirtschaftsinformatik"), titles
+    assert education.entries[0].period == "seit 01/2025"
+
+
+def test_the_professional_qualifier_survives_the_reordering():
+    """The subline must still name the degree, not whatever sorts first."""
+    cv = build_cv(evidence_for(), role="Trainee IT")
+    assert cv.subline.startswith("Wirtschaftsinformatiker · "), cv.subline
+
+
+def test_zab_recognition_is_shown_and_the_internal_note_is_not():
+    """Item 9: shown because the profile evidences it; no degree title claimed."""
+    evidence = evidence_for()
+    degree = next(item for item in evidence.education if item.is_academic_degree)
+    assert "ZAB" in degree.shown_note("de")
+    assert "Hochschulabschluss" in degree.shown_note("de")
+
+    cv = build_cv(evidence, role="Trainee IT")
+    claims = " ".join(cv.all_claims())
+    assert "ZAB-Bewertung" in claims
+    # The internal `note` is an instruction to the generator, not CV text.
+    assert "do not claim" not in claims
+    assert degree.note not in claims
+    assert check_claims(cv.all_claims(), evidence).ok
+
+
+def test_no_particular_german_degree_title_is_claimed():
+    cv = build_cv(evidence_for(), role="Trainee IT")
+    text = " ".join([cv.summary, cv.subline, cv.headline, *cv.all_claims()])
+    for forbidden in ("Bachelor", "Master", "Diplom", "B.Sc", "M.Sc", "Magister"):
+        assert forbidden not in text, f"claimed a German degree title: {forbidden}"
+
+
+# --- 9. the two named vacancies -----------------------------------------
+
+DATACENTER_ADVERT = (
+    "Starte als IT-Consultant im Bereich Datacenter durch. Moderne "
+    "DevOps-Architekturen zur automatisierten Bereitstellung von "
+    "Rechenzentrumsplattformen, Integration von Datacenter-Infrastrukturen in "
+    "Multicloud-Umgebungen, Effizienzoptimierung von IT-Betriebsprozessen "
+    "mittels Automatisierung, Aufbau von Big Data und KI-Infrastrukturloesungen. "
+    "Dein Profil: relevante IT-(Hochschul-)Ausbildung, idealerweise erste "
+    "Erfahrungen mit Scripting sowie mit Linux, Server- oder "
+    "Storage-Technologien, sehr gute Deutsch- und Englischkenntnisse.")
+
+BANK_IT_ADVERT = (
+    "Werde Teil unseres Teams in Frankfurt am Main als Trainee IT. Verschaffe "
+    "dir den Ueberblick in Bereichen wie Softwareentwicklung, Cyber Security "
+    "und der Bereitstellung von IT-Systemen. Du erhaeltst Einblicke in "
+    "Programmiersprachen und Tools wie Java, Javascript und CSS sowie "
+    "unterschiedliche Betriebssysteme (Windows, Linux, AIX), Datenbanken und "
+    "Anwendungsserver. Teamarbeit und analytisches Denken sind uns wichtig.")
+
+
+def test_a_datacenter_consulting_vacancy_leads_with_infrastructure():
+    """Item 4: Linux, networking, Docker and server evidence come first."""
+    evidence = evidence_for(DATACENTER_ADVERT, track="it_consulting")
+    rows = skill_rows(evidence, "de", track="it_consulting")
+    labels = [label for label, _ in rows]
+    assert labels[0] == "DevOps & Werkzeuge", labels
+    assert "Systemprogrammierung & Netzwerke" in labels[:2], labels
+    printed = " ".join(value for _, value in rows)
+    for technology in ("Docker", "NGINX", "Linux", "Bash", "TCP-Sockets"):
+        assert technology in printed, f"{technology} missing from a datacenter CV"
+
+    projects = [item.name for item in evidence.projects]
+    assert "Inception" in projects, "the Docker/NGINX infrastructure project"
+    assert "Minishell" in projects, "the Unix/systems project"
+    # No infrastructure experience is invented, and nothing private leaks.
+    cv = build_cv(evidence, role="Trainee IT Consulting w/m/d - Datacenter")
+    text = " ".join([cv.summary, *cv.all_claims()])
+    for invented in ("Kubernetes", "Terraform", "Ansible", "AWS", "Azure",
+                     "Rechenzentrum betrieben", "Jahre Erfahrung"):
+        assert invented not in text, f"invented infrastructure claim: {invented}"
+    for secret in ("webserv", "greenroute", "GreenRoute"):
+        assert secret not in text
+    assert check_claims(cv.all_claims(), evidence).ok
+
+
+def test_a_bank_it_vacancy_leads_with_programming_and_data():
+    """Item 5: programming, backend and database evidence come first."""
+    evidence = evidence_for(BANK_IT_ADVERT, track="graduate_entry")
+    rows = skill_rows(evidence, "de", track="graduate_entry")
+    labels = [label for label, _ in rows]
+    assert labels[0] == "Programmiersprachen", labels
+    assert "Datenbanken" in labels, labels
+    assert "Backend & Frameworks" in labels, labels
+    assert rows[0][1].startswith("Java 17"), rows[0][1]
+
+    projects = [item.name for item in evidence.projects]
+    assert projects[0] == "Pizza In Progress", \
+        f"the Spring Boot/Java project must lead a Java vacancy: {projects}"
+    cv = build_cv(evidence, role="Trainee IT (m/w/d)")
+    assert check_claims(cv.all_claims(), evidence).ok
+    # Javascript and CSS are named by the advert and evidenced nowhere.
+    printed = " ".join(value for _, value in rows)
+    assert "JavaScript" not in printed and "CSS" not in printed
+
+
+def test_the_two_vacancies_produce_different_cvs():
+    datacenter = skill_rows(evidence_for(DATACENTER_ADVERT, track="it_consulting"),
+                            "de", track="it_consulting")
+    bank = skill_rows(evidence_for(BANK_IT_ADVERT, track="graduate_entry"),
+                      "de", track="graduate_entry")
+    assert [label for label, _ in datacenter] != [label for label, _ in bank]
+    assert {item for _, value in datacenter for item in value.split("  ·  ")} != \
+        {item for _, value in bank for item in value.split("  ·  ")}
+    for rows in (datacenter, bank):
+        printed = " ".join(value for _, value in rows)
+        assert "C" in printed.split("  ·  ") or "C++" in printed
+
+
+def test_a_gender_marker_outside_parentheses_is_stripped():
+    assert clean_role("Trainee IT Consulting w/m/d - Datacenter") == \
+        "Trainee IT Consulting - Datacenter"
+    assert clean_role("Developer d/m/w") == "Developer"
+
+
+def test_the_letter_uses_german_terminology_and_a_readable_skills_list():
+    """Item 1 covers the letter too, not only the CV."""
+    letter = deterministic_letter(evidence_for(), company="Finanz Informatik",
+                                  role="Trainee IT (m/w/d)")
+    body = letter.text
+    assert "Processes" not in body, "an English label in a German letter"
+    assert "Configuration Parsing" not in body
+    # Headline technologies, not whole slash-separated bundles inside a list.
+    found = re.search(r"Meine technischen Schwerpunkte sind ([^.]*)\.", body)
+    assert found, body
+    listed = found.group(1)
+    assert " / " not in listed, f"bundles read badly in a list: {listed}"
+    assert " und " in listed, f"the last item must join with 'und': {listed}"
+    assert check_text(body, evidence_for(), company="Finanz Informatik",
+                      role="Trainee IT").ok

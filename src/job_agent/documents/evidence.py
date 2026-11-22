@@ -64,6 +64,44 @@ REQUIREMENT_SIGNALS: dict[str, tuple[str, ...]] = {
     "linux": ("linux",), "unix": ("linux",), "bash": ("bash",),
     "shell": ("bash",), "git": ("git",), "ci/cd": ("git", "docker"),
     "abap": (), "sap": (),  # Deliberately empty: no evidenced SAP experience.
+    # Infrastructure, datacenter and consulting vocabulary. A datacenter
+    # trainee advert says "Scripting", "DevOps" and "Server-Technologien", none
+    # of which matched anything, so such a vacancy produced almost no cues and
+    # the CV could not adapt to it. Each entry maps advert wording to the
+    # *evidenced* skill fragments it actually corresponds to.
+    "scripting": ("bash",), "skripting": ("bash",), "skript": ("bash",),
+    "shell-skript": ("bash",),
+    "devops": ("docker", "git", "linux"),
+    "automatisierung": ("bash", "python"), "automation": ("bash", "python"),
+    "rechenzentrum": ("linux", "docker"), "datacenter": ("linux", "docker"),
+    "data center": ("linux", "docker"),
+    "server": ("linux", "nginx"), "server-technologien": ("linux", "nginx"),
+    "betriebssystem": ("linux",), "operating system": ("linux",),
+    "virtualisierung": ("docker",), "containerisierung": ("docker",),
+    "webserver": ("nginx", "http"), "proxy": ("nginx",),
+    "tcp/ip": ("tcp",), "protokoll": ("http", "tcp"),
+    "python": ("python",),
+    # Deliberately empty: named by such adverts, evidenced nowhere. Listing
+    # them documents the decision and keeps them out of "requirements
+    # addressed", where an empty mapping is already the SAP precedent.
+    "kubernetes": (), "terraform": (), "ansible": (), "cloud": (),
+    "multicloud": (), "storage": (), "monitoring": (), "big data": (),
+    # German plurals and compounds, spelled out. The signal match is
+    # word-bounded on purpose -- it is what stops an advert's "Javascript"
+    # from raising "Java" -- but that also meant the plural forms adverts
+    # actually use went unseen: a bank-IT advert naming "Datenbanken" and
+    # "Betriebssysteme (Windows, Linux, AIX)" produced no database or OS cue
+    # at all, so the CV could not respond to it.
+    "datenbanken": ("sql",), "databases": ("sql",),
+    "betriebssysteme": ("linux",), "operating systems": ("linux",),
+    "protokolle": ("http", "tcp"), "skripte": ("bash",),
+    "schnittstellen": ("rest", "http"), "container": ("docker",),
+    "unit-tests": ("phpunit", "junit"), "testing": ("phpunit", "junit"),
+    # Named by these adverts and evidenced nowhere. Explicit, so the decision
+    # is visible and they stay out of "requirements addressed".
+    "javascript": (), "css": (), "anwendungsserver": (), "aix": (),
+    "cyber security": (), "informationssicherheit": (), "risikomanagement": (),
+    "windows": (),
 }
 
 # How a requirement signal is spelled when it appears in a document. The
@@ -85,6 +123,28 @@ REQUIREMENT_DISPLAY: dict[str, str] = {
     "network": "networking", "tcp": "TCP",
     "linux": "Linux", "unix": "Unix", "bash": "Bash", "shell": "Shell",
     "git": "Git", "ci/cd": "CI/CD", "sap": "SAP", "abap": "ABAP",
+    "scripting": "Scripting", "skripting": "Skripting", "skript": "Skripte",
+    "shell-skript": "Shell-Skripte", "devops": "DevOps",
+    "automatisierung": "Automatisierung", "automation": "automation",
+    "rechenzentrum": "Rechenzentrum", "datacenter": "Datacenter",
+    "data center": "data centre", "server": "Server",
+    "server-technologien": "Server-Technologien",
+    "betriebssystem": "Betriebssysteme", "operating system": "operating systems",
+    "virtualisierung": "Virtualisierung",
+    "containerisierung": "Containerisierung", "webserver": "Webserver",
+    "proxy": "Proxy", "tcp/ip": "TCP/IP", "protokoll": "Protokolle",
+    "kubernetes": "Kubernetes", "terraform": "Terraform", "ansible": "Ansible",
+    "cloud": "Cloud", "multicloud": "Multicloud", "storage": "Storage",
+    "monitoring": "Monitoring", "big data": "Big Data",
+    "datenbanken": "Datenbanken", "databases": "databases",
+    "betriebssysteme": "Betriebssysteme", "operating systems": "operating systems",
+    "protokolle": "Protokolle", "skripte": "Skripte",
+    "schnittstellen": "Schnittstellen", "unit-tests": "Unit-Tests",
+    "testing": "Tests", "javascript": "JavaScript", "css": "CSS",
+    "anwendungsserver": "Anwendungsserver", "aix": "AIX",
+    "cyber security": "Cyber Security",
+    "informationssicherheit": "Informationssicherheit",
+    "risikomanagement": "Risikomanagement", "windows": "Windows",
 }
 
 
@@ -412,6 +472,18 @@ class EvidenceSelection:
         }
 
 
+# Ranking-only equivalences. See content.RANKING_SYNONYMS; kept here too so
+# project and skill *selection* uses the same view the CV layout does.
+_RANKING_EQUIVALENTS: dict[str, tuple[str, ...]] = {
+    "linux": ("unix",),
+    "rest": ("http",),
+    # "sql" is deliberately NOT expanded to mysql/mariadb: the fragment match
+    # is substring-based, so "sql" already hits "MySQL", and expanding it
+    # double-counted one technology -- enough to lift a PHP login form above
+    # the Spring Boot project on a Java vacancy.
+}
+
+
 def _requirement_terms(description: str) -> list[str]:
     """Technologies the advert actually asks for, in the advert's own words."""
     folded = _fold(description)
@@ -443,6 +515,10 @@ def select_evidence(profile: Mapping[str, Any], *, job_id: str, role: str,
     requirements = _requirement_terms(description)
     needed_fragments = {fragment for term in requirements
                         for fragment in REQUIREMENT_SIGNALS[term]}
+    # Ranking-only equivalences, so a Linux vacancy also sees Unix evidence.
+    # They decide order, never what may be claimed.
+    needed_fragments |= {synonym for fragment in set(needed_fragments)
+                         for synonym in _RANKING_EQUIVALENTS.get(fragment, ())}
 
     shareable = public_projects(profile)
     allowed_repos = {str(item["repository"]).split("/")[-1] for item in shareable}
