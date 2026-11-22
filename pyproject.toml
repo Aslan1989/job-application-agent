@@ -1,0 +1,35 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "job-application-agent"
+version = "0.13.0"
+description = "Human-approved job discovery agent: skill-based multi-source search, evidence-based AI matching, no automatic submission"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "google-api-python-client>=2.0,<3.0",
+    "google-auth>=2.0,<3.0",
+    "google-auth-oauthlib>=1.0,<2.0",
+    "langgraph>=1.0,<2.0",
+    "python-dotenv>=1.0,<2.0",
+    "requests>=2.31,<3.0",
+    # Document generation. python-docx produces the editable DOCX; reportlab
+    # renders the PDF when LibreOffice is not installed locally.
+    "python-docx>=1.1,<2.0",
+    "reportlab>=4.0,<5.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0,<10.0"]
+
+[project.scripts]
+job-agent = "job_agent.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/job_agent"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

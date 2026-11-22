@@ -1,0 +1,24 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+*.egg-info/
+dist/
+credentials.json
+token.json
+service-account.json
+*.secret.json
+.coverage
+.DS_Store
+
+data/candidate_profile.json
+data/github_projects.json
+data/description_cache.json
+data/contact.json
+output/
+logs/
+
+# Bewerbungsfoto: local only, never committed, never sent to a model
+data/profile_photo.*
+data/profile_photo.jpg

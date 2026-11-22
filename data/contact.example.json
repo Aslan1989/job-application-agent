@@ -1,0 +1,12 @@
+{
+  "_note": "Local only. Listed in .gitignore and never included in a model prompt. Copy to data/contact.json and fill in your own details.",
+  "full_name": "",
+  "email": "",
+  "phone": "",
+  "street": "",
+  "postal_code": "",
+  "city": "",
+  "country": "Deutschland",
+  "github_url": "",
+  "linkedin_url": ""
+}

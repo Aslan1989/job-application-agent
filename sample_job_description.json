@@ -1,0 +1,10 @@
+{
+  "job_id": "DEMO-LLM-PHP-001",
+  "company": "Example Company — FICTIONAL",
+  "role": "Junior PHP Backend Developer",
+  "location": "Frankfurt am Main",
+  "job_url": "https://example.com/not-a-real-job",
+  "work_mode": "Hybrid",
+  "source": "Synthetic demo — NEVER APPLY",
+  "description": "This is a fictional role designed only to test the Job Application Agent AI matching workflow. A junior PHP backend developer would maintain PHP 8 applications, develop REST JSON endpoints, use SQL and MariaDB, collaborate on Linux and Docker-based services, write PHPUnit tests, use Git, and communicate in German at B2 level. Prior commercial software developer employment is not required; relevant training and projects are sufficient. Location is Frankfurt am Main with hybrid work arrangements."
+}

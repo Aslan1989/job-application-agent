@@ -1,0 +1,133 @@
+{
+  "schema_version": "0.9",
+  "note": "Employer boards for direct-from-source discovery. Every entry below was confirmed read-only on 2026-11-21 by calling the public API and counting postings; `observed` records what was actually returned, not an estimate. Location mix changes constantly, so re-check with `job-agent employers --probe` before trusting `enabled`. Add your own employers here; do not guess board tokens, confirm one by opening the URL first.",
+  "finding": "Across 1425 postings on these 13 boards only 4 were in Frankfurt/Stuttgart/Heilbronn and 34 including remote-Germany. The Greenhouse/Lever/Ashby ecosystem is Berlin/Munich-centric. Large Frankfurt, Stuttgart and Heilbronn employers mostly run their own portals or SAP SuccessFactors, which is why `career_pages` and the Brave adapter exist.",
+  "employers": [
+    {
+      "name": "Raisin",
+      "platform": "greenhouse",
+      "board": "raisin",
+      "enabled": true,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 31, "in_target_cities": 3, "with_remote_germany": 3},
+      "notes": "Berlin HQ, posts multi-city roles including 'Frankfurt a. M.'. Best hit rate of the verified boards."
+    },
+    {
+      "name": "HelloFresh",
+      "platform": "greenhouse",
+      "board": "hellofresh",
+      "enabled": true,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 376, "in_target_cities": 1, "with_remote_germany": 1},
+      "notes": "Large board, overwhelmingly Berlin; occasional Frankfurt am Main role."
+    },
+    {
+      "name": "Celonis",
+      "platform": "greenhouse",
+      "board": "celonis",
+      "enabled": true,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 262, "in_target_cities": 0, "with_remote_germany": 3},
+      "notes": "Munich HQ. Only reachable via ALLOW_REMOTE_GERMANY=true."
+    },
+    {
+      "name": "Parloa",
+      "platform": "ashby",
+      "board": "parloa",
+      "enabled": true,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 46, "in_target_cities": 0, "with_remote_germany": 6},
+      "notes": "Berlin/Munich AI voice-agent company; 'Germany Remote' postings. Relevant to the AI track."
+    },
+    {
+      "name": "Cosuno",
+      "platform": "ashby",
+      "board": "cosuno",
+      "enabled": true,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 27, "in_target_cities": 0, "with_remote_germany": 21},
+      "notes": "Mostly 'Berlin/Remote'. Only reachable via ALLOW_REMOTE_GERMANY=true."
+    },
+    {
+      "name": "SumUp",
+      "platform": "greenhouse",
+      "board": "sumup",
+      "enabled": false,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 318, "in_target_cities": 0, "with_remote_germany": 0},
+      "notes": "Board is live but nothing matched the target cities on the verification date. Enable if you widen the location list."
+    },
+    {
+      "name": "Adyen",
+      "platform": "greenhouse",
+      "board": "adyen",
+      "enabled": false,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 243, "in_target_cities": 0, "with_remote_germany": 0},
+      "notes": "Live board, no target-city postings on the verification date."
+    },
+    {
+      "name": "Contentful",
+      "platform": "greenhouse",
+      "board": "contentful",
+      "enabled": false,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 50, "in_target_cities": 0, "with_remote_germany": 0},
+      "notes": "Berlin and Munich only on the verification date."
+    },
+    {
+      "name": "N26",
+      "platform": "greenhouse",
+      "board": "n26",
+      "enabled": false,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 23, "in_target_cities": 0, "with_remote_germany": 0},
+      "notes": "Live board, Berlin-centric."
+    },
+    {
+      "name": "trivago",
+      "platform": "greenhouse",
+      "board": "trivago",
+      "enabled": false,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 20, "in_target_cities": 0, "with_remote_germany": 0},
+      "notes": "Düsseldorf. Live board, no target-city postings on the verification date."
+    },
+    {
+      "name": "Tacto",
+      "platform": "ashby",
+      "board": "tacto",
+      "enabled": false,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 27, "in_target_cities": 0, "with_remote_germany": 0},
+      "notes": "Munich. Live board, no target-city postings on the verification date."
+    },
+    {
+      "name": "KONUX",
+      "platform": "greenhouse",
+      "board": "konux",
+      "enabled": false,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 2, "in_target_cities": 0, "with_remote_germany": 0},
+      "notes": "Munich. Very small board."
+    },
+    {
+      "name": "Langfuse",
+      "platform": "ashby",
+      "board": "langfuse",
+      "enabled": false,
+      "verified_on": "2026-11-21",
+      "observed": {"total": 0, "in_target_cities": 0, "with_remote_germany": 0},
+      "notes": "Board exists and answers but published nothing on the verification date. LLM-tooling company; worth re-checking for the AI track."
+    }
+  ],
+  "career_pages": [
+    {
+      "name": "EXAMPLE — replace or delete me",
+      "url": "https://example.invalid/careers",
+      "enabled": false,
+      "max_links": 20,
+      "notes": "Add an employer's own careers page here only after checking (1) that its robots.txt permits fetching and (2) that its posting pages publish schema.org JobPosting JSON-LD. The adapter reads only that structured data and never guesses a vacancy out of page text. Many large German employers run SAP SuccessFactors or Workday portals that render jobs with JavaScript and publish no JSON-LD; those cannot be read this way and are not supported."
+    }
+  ]
+}

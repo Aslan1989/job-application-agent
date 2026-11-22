@@ -1,0 +1,14 @@
+{
+  "job_id": "DEMO-PYTHON-FRA-001",
+  "company": "Example Company (NOT A REAL VACANCY)",
+  "role": "Junior Python Developer",
+  "location": "Frankfurt am Main",
+  "work_mode": "Hybrid",
+  "source": "Manual demo",
+  "job_url": "https://example.com/placeholder-not-a-job",
+  "match_score": 88,
+  "match_explanation": "Synthetic demo score; AI matching not yet implemented.",
+  "critical_gaps": "Demo data only",
+  "language": "German/English",
+  "notes": "TEST RECORD — safe to remove after checking the API"
+}
