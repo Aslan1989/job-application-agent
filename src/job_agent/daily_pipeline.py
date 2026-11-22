@@ -432,16 +432,27 @@ def discover_jobs(sources: Sequence[JobSource], queries: Sequence[SearchQuery], 
                 single_shot_done.add(key)
             attempted[key] = attempted.get(key, 0) + 1
             report.requests += 1
+            single_shot = bool(getattr(source, "single_shot", False))
             # A single-shot source has no keyword search and returns its whole
             # city-filtered set once, so it needs more headroom than one query.
-            size = (min(400, max(per_search, 100))
-                    if getattr(source, "single_shot", False) else per_search)
+            size = (min(400, max(per_search, 100)) if single_shot else per_search)
+            # A whole-board source gets NO per-query city. It is called once per
+            # run, so `query.city` would be whichever city the day's first
+            # planned query happened to carry -- and `search_plan` rotates that
+            # by date. Handing it over made a once-per-run fetch depend on the
+            # calendar, and a source that trusted the argument instead of its
+            # own configured cities lost almost every posting on the two days
+            # in three when the rotation did not start at its city. The real
+            # adapters all gate on their own `cities` (and drop an empty
+            # string), and `_matches_any_city` below re-applies the strict gate
+            # to everything returned, so over-fetching is the safe direction.
+            city = "" if single_shot else query.city
             try:
-                hits = source.discover(term=query.term, city=query.city, size=size)
+                hits = source.discover(term=query.term, city=city, size=size)
             except Exception as exc:  # noqa: BLE001 - isolate per source
                 report.source_failures[key] = report.source_failures.get(key, 0) + 1
                 report.fail(StageError("discovery", type(exc).__name__, key,
-                                       f"{query.term} @ {query.city}"))
+                                       f"{query.term} @ {city or 'all cities'}"))
                 continue
             report.fetched += len(hits)
             report.fetched_by_source[key] = report.fetched_by_source.get(key, 0) + len(hits)

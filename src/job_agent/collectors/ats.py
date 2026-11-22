@@ -26,7 +26,8 @@ from typing import Any, Mapping, Sequence
 import requests
 
 from ..retry import retry_call
-from ..sources import NormalizedJob, location_matches, strip_html, today_iso
+from ..sources import (NormalizedJob, board_city_gate, location_matches,
+                       strip_html, today_iso)
 
 GREENHOUSE_URL = "https://boards-api.greenhouse.io/v1/boards/{board}/jobs"
 LEVER_URL = "https://api.lever.co/v0/postings/{board}"
@@ -122,15 +123,21 @@ class _BoardSource:
         raise NotImplementedError
 
     def discover(self, *, term: str = "", city: str = "", size: int = 100) -> list[NormalizedJob]:
-        """Every posting in the configured cities. `term` is intentionally unused."""
+        """Every posting in the configured cities.
+
+        `term` and `city` are both intentionally unused: these APIs have no
+        keyword search, and a whole-board source is fetched once per run, so a
+        per-query city would only be whichever one the day's first planned
+        query happened to carry. See `sources.board_city_gate`.
+        """
         if not 1 <= size <= 500:
             raise ValueError("size must be 1..500")
-        wanted = tuple(part for part in (city, *self.cities) if part)
         found: list[NormalizedJob] = []
         for postings in self._load().values():
             for job in postings:
-                if not location_matches(job.location, wanted,
-                                        allow_remote_germany=self.allow_remote_germany):
+                if not board_city_gate(job.location, self.cities,
+                                       fallback_city=city,
+                                       allow_remote_germany=self.allow_remote_germany):
                     continue
                 found.append(job)
                 if len(found) >= size:

@@ -168,6 +168,56 @@ header. Both consume the same `CvContent`, so a style is presentation and can
 never add or drop a fact — a test asserts the two carry the identical set of
 words.
 
+## Technical skills: seven categories, ordered by the vacancy
+
+The profile records skills as evidenced *bundles* — `"Java 17 / Spring Boot /
+JPA / Security"` — because a single evidence list backs the whole bundle. A CV
+reads better split, so each bundle is divided on `/` and every technology is
+placed in one of seven categories:
+
+| Category | From this profile |
+|---|---|
+| Programmiersprachen | Java 17, C, C++, PHP 8 |
+| Backend & Frameworks | Spring Boot, JPA, Security, OOP |
+| Systemprogrammierung & Netzwerke | Linux, Processes, HTTP, TCP Sockets, Configuration Parsing |
+| Datenbanken | MariaDB, MySQL, SQL, PDO |
+| KI & LLM | RAG, Embeddings, Ollama |
+| DevOps & Werkzeuge | Docker, Docker Compose, NGINX, PHP-FPM, Bash, Git, GitHub |
+| Tests | JUnit, MockMvc |
+
+Splitting a bundle asserts exactly what the bundle asserts, decomposed. Every
+fragment is printed **verbatim**: a category is a label on existing evidence,
+never a competency, and nothing is translated.
+
+**Nothing is dropped for being off-focus.** C and C++ appear on a Java, PHP or
+AI CV too. What the vacancy changes is the order:
+
+```
+C/C++ vacancy    Systemprogrammierung & Netzwerke: Linux · Processes · HTTP · TCP Sockets · …
+                 Programmiersprachen: C · C++ · PHP 8 · Java 17
+Java vacancy     Backend & Frameworks: Spring Boot · JPA · Security · OOP
+                 Programmiersprachen: Java 17 · PHP 8 · C · C++
+AI vacancy       KI & LLM: RAG · Embeddings · Ollama
+                 DevOps & Werkzeuge: Docker · …
+```
+
+A category's rank is the best relevance score among its technologies plus a
+tie-breaking bonus from the vacancy's career track (`TRACK_EMPHASIS`). The
+advert outranks the track emphasis deliberately: a PHP vacancy leads with
+`Programmiersprachen: PHP 8 …`, because this profile's backend bundle is
+Spring-centric and leading with it would put Java work first in a PHP
+application.
+
+Cue matching is word-boundary in both directions, so an advert asking for
+"Javascript" never raises "Java", and a one-character technology ("C") must
+match exactly — "Docker" cannot raise it.
+
+**Only evidenced technologies are printed.** `Python / OSMnx / NetworkX /
+Streamlit` rests solely on the private `greenroute-hn` repository, so it is
+stripped and Python appears on no CV; emphasising Python for an AI vacancy
+requires CV or public-repository evidence in the profile first. `SAP ABAP` is
+`not_evidenced` and excluded the same way.
+
 ## The Bewerbungsfoto
 
 Saved by the user at `data/profile_photo.jpg` (`.jpeg`/`.png` also accepted),
@@ -267,8 +317,8 @@ A vacancy whose advert is not in the cache is skipped with that message; run
 - No LibreOffice here, so PDFs are rendered rather than converted. This also
   means the DOCX page count cannot be verified locally; only the PDF's is. Open
   the DOCX once in Word or LibreOffice before sending.
-- No `data/profile_photo.jpg` on this machine yet, so the `modern` CV currently
-  renders without a photo and the report says so.
+- Python is evidenced only by a private repository, so it cannot be presented.
+  That is the `not_evidenced`/private rule working, not a gap in the renderer.
 - The fact checker recognises known fabrication patterns. It is a safety net,
   not a substitute for reading the draft.
 - Document generation is **not** part of the daily runner and will not be added

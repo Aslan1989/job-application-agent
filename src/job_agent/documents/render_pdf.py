@@ -290,7 +290,14 @@ def _rows(pairs: Sequence[tuple[str, str]], style: CvStyle,
     if style.is_ats or not style.allow_tables:
         return [Paragraph(f"<b>{_escape(label)}:</b> {_escape(value)}",
                           styles["body"]) for label, value in pairs]
-    label_width = min(width * 0.30, 46 * mm)
+    # Size the label column to the longest label actually present, rather than
+    # a fixed guess: "Systemprogrammierung & Netzwerke" wrapped onto three
+    # lines in a 46mm column and threw the whole block out of alignment.
+    from reportlab.pdfbase.pdfmetrics import stringWidth
+
+    longest = max((stringWidth(label, "Helvetica-Bold", style.body_pt)
+                   for label, _ in pairs), default=0.0)
+    label_width = min(max(longest + 6, 30 * mm), width * 0.40)
     table = Table(
         [[Paragraph(_escape(label), styles["rowlabel"]),
           Paragraph(_escape(value), styles["rowvalue"])] for label, value in pairs],
@@ -309,10 +316,13 @@ def _entry(entry, style: CvStyle, styles: dict[str, ParagraphStyle], *,
            width: float) -> list:
     """One project, job or qualification, kept together on a single page."""
     flow: list = []
-    if entry.period and not style.is_ats and style.allow_tables:
+    # A project has no dates but does have a repository: the right-hand slot
+    # carries whichever exists, so the entry costs one line, not two.
+    trailing = entry.period or (entry.link if not entry.subtitle else "")
+    if trailing and not style.is_ats and style.allow_tables:
         table = Table([[Paragraph(_escape(entry.title), styles["entry"]),
-                        Paragraph(_escape(entry.period), styles["period"])]],
-                      colWidths=[width * 0.68, width * 0.32])
+                        Paragraph(_escape(trailing), styles["period"])]],
+                      colWidths=[width * 0.58, width * 0.42])
         table.setStyle(TableStyle([
             ("VALIGN", (0, 0), (-1, -1), "BOTTOM"),
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
@@ -321,11 +331,20 @@ def _entry(entry, style: CvStyle, styles: dict[str, ParagraphStyle], *,
             ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
         ]))
         flow.append(table)
-        meta = " | ".join(part for part in (entry.subtitle, entry.link) if part)
+        meta = " | ".join(part for part in (entry.subtitle, entry.link)
+                          if part and part != trailing)
     else:
-        flow.append(Paragraph(_escape(entry.title), styles["entry"]))
+        # No table in the `ats` variant, so the trailing reference is appended
+        # inline. Both the DOCX and the PDF then spend one line on it, which
+        # keeps the two files' line counts -- and their pagination -- aligned.
+        title_text = _escape(entry.title)
+        if trailing:
+            title_text += (f' <font size="{style.meta_pt}" '
+                           f'color="{style.muted}">\u2013 {_escape(trailing)}</font>')
+        flow.append(Paragraph(title_text, styles["entry"]))
         meta = " | ".join(part for part in
-                          (entry.subtitle, entry.period, entry.link) if part)
+                          (entry.subtitle, entry.period, entry.link)
+                          if part and part != trailing)
     if meta:
         flow.append(Paragraph(_escape(meta), styles["sub"]))
     if entry.bullets:

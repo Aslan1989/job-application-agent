@@ -320,9 +320,33 @@ def check_text(text: str, evidence: EvidenceSelection, *,
     return result
 
 
+# The separator the CV uses inside a compact skills row.
+SKILL_ROW_SEPARATOR = "\u00b7"
+
+
+def skill_atoms(evidence: EvidenceSelection) -> frozenset[str]:
+    """Every technology a profile skill bundle names, as its own token.
+
+    The profile records bundles ("Java 17 / Spring Boot / JPA / Security") and
+    the CV prints a category row of individual technologies, so the checker
+    needs the pieces. These are matched by **exact equality only** and are
+    deliberately kept out of `allowed_points`: a one-character atom like "c"
+    inside a containment test would match nearly any sentence and quietly
+    disable the whole check.
+    """
+    atoms: set[str] = set()
+    for skill in evidence.skills:
+        for fragment in str(skill.name).split("/"):
+            folded = _fold(fragment).strip()
+            if folded:
+                atoms.add(folded)
+    return frozenset(atoms)
+
+
 def check_claims(claims: Iterable[str], evidence: EvidenceSelection) -> FactCheckResult:
     """Check structured CV bullet points, which must come from evidence verbatim."""
     result = FactCheckResult()
+    atoms = skill_atoms(evidence)
     allowed_points = {_fold(point) for project in evidence.projects
                       for point in project.points}
     # The German renderings in the profile (`evidence_points_de`,
@@ -345,8 +369,17 @@ def check_claims(claims: Iterable[str], evidence: EvidenceSelection) -> FactChec
     allowed_points.discard("")
     for claim in claims:
         folded = _fold(claim)
-        if folded and not any(folded in allowed or allowed in folded
-                              for allowed in allowed_points):
-            result.add("unverified_cv_claim", SEVERITY_BLOCKING,
-                       "CV line does not correspond to any profile entry", claim)
+        if not folded:
+            continue
+        if any(folded in allowed or allowed in folded for allowed in allowed_points):
+            continue
+        # A skills row: every technology in it must be one the profile names,
+        # matched exactly. One unknown item fails the whole row.
+        items = [_fold(part).strip() for part in
+                 str(claim).split(SKILL_ROW_SEPARATOR)]
+        items = [item for item in items if item]
+        if items and all(item in atoms for item in items):
+            continue
+        result.add("unverified_cv_claim", SEVERITY_BLOCKING,
+                   "CV line does not correspond to any profile entry", claim)
     return result

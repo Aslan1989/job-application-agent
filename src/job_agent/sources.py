@@ -372,6 +372,38 @@ def location_matches(location: str, cities: Sequence[str], *,
     return False
 
 
+def board_city_gate(location: str, cities: Sequence[str], *,
+                    fallback_city: str = "",
+                    allow_remote_germany: bool = False) -> bool:
+    """City gate for a whole-board (`single_shot`) source.
+
+    Such a source is fetched once per run, and `discover_jobs` gives it no
+    per-query city: `search_plan` rotates that by date, so the argument would
+    be whichever city the day's first planned query happened to carry, and a
+    board has no city search to use it with anyway.
+
+    Precedence, in order:
+
+    1. **The configured cities are authoritative.** They come from the Profile
+       tab via `build_sources`, which always supplies them.
+    2. `fallback_city` applies *only* when the source was constructed without
+       any cities. It is a fallback, never an addition: the adapters used to
+       gate on `(city, *self.cities)`, and that union let a stray argument
+       *widen* a board beyond the configured area, the opposite of what their
+       docstrings promised.
+    3. With neither, the gate is **open**. The pipeline re-applies the strict
+       rule (`_matches_any_city`) to everything returned, so over-fetching is
+       the safe direction, whereas matching nothing would silence the source.
+    """
+    wanted = tuple(part for part in cities if str(part).strip())
+    if not wanted and str(fallback_city).strip():
+        wanted = (str(fallback_city).strip(),)
+    if not wanted:
+        return True
+    return location_matches(location, wanted,
+                            allow_remote_germany=allow_remote_germany)
+
+
 def term_matches(haystack: str, term: str) -> bool:
     """Local full-text screen for boards with no server-side search.
 

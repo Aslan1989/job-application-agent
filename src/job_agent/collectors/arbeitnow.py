@@ -10,7 +10,7 @@ from typing import Any, Mapping
 
 import requests
 
-from ..sources import NormalizedJob, location_matches, strip_html, today_iso
+from ..sources import NormalizedJob, board_city_gate, strip_html, today_iso
 
 BASE_URL = "https://www.arbeitnow.com/api/job-board-api"
 
@@ -88,7 +88,7 @@ class ArbeitnowSource:
 
     def discover(self, *, term: str = "", city: str = "",
                  size: int = 100) -> list[NormalizedJob]:
-        """Every posting in the configured cities. `term` is intentionally unused.
+        """Every posting in the configured cities. `term` and `city` are unused.
 
         Arbeitnow has no keyword search, and matching a career track's exact
         title phrase against a 300-entry feed discarded almost every real hit.
@@ -103,9 +103,9 @@ class ArbeitnowSource:
             location = str(entry.get("location") or "").strip()
             if not slug or not title:
                 continue
-            wanted = tuple(part for part in (city, *self.cities) if part)
-            if not location_matches(location, wanted,
-                                    allow_remote_germany=self.allow_remote_germany):
+            if not board_city_gate(location, self.cities,
+                                   fallback_city=city,
+                                   allow_remote_germany=self.allow_remote_germany):
                 continue
             try:
                 job = NormalizedJob(

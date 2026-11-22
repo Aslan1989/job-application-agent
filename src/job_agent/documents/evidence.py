@@ -158,10 +158,42 @@ class SkillEvidence:
     tracks: tuple[str, ...]
     confidence: str
     caution: str = ""
+    name_de: str = ""
+    # True when the profile evidences this skill only through a repository the
+    # candidate keeps private. The skill is real and may be listed on a CV --
+    # the work was done -- but it has no citable project, so the repository is
+    # never named and the skill never enters a model prompt.
+    private_backed: bool = False
 
     @property
     def github_backed(self) -> bool:
         return any(source.startswith("github:") for source in self.sources)
+
+    def named(self, language: str) -> str:
+        """The skill as the document's language spells it.
+
+        German falls back to the English name when the profile has no
+        `name_de`, or when the two do not split into the same number of
+        technologies -- an unaligned pair would silently mislabel a fragment.
+        """
+        if language != "de" or not self.name_de:
+            return self.name
+        if len(self.name_de.split("/")) != len(self.name.split("/")):
+            return self.name
+        return self.name_de
+
+    def aligned(self, language: str) -> tuple[tuple[str, str], ...]:
+        """(english fragment, displayed fragment) for each technology.
+
+        The English fragment stays the key for categorisation and for the
+        fact checker; only the displayed half is localised.
+        """
+        english = [part.strip() for part in self.name.split("/") if part.strip()]
+        shown = [part.strip() for part in self.named(language).split("/")
+                 if part.strip()]
+        if len(shown) != len(english):
+            shown = english
+        return tuple(zip(english, shown))
 
 
 @dataclass(frozen=True)
@@ -258,8 +290,12 @@ class EducationEvidence:
     title: str
     institution: str
     dates: str
+    # `note` is an internal instruction to the generator and is NEVER printed.
+    # Only `cv_note_de`/`cv_note_en` may appear in a document.
     note: str = ""
     title_de: str = ""
+    cv_note_de: str = ""
+    cv_note_en: str = ""
 
     def titled(self, language: str) -> str:
         """The qualification as a German CV should print it, when known.
@@ -271,6 +307,28 @@ class EducationEvidence:
         if language == "de" and self.title_de:
             return self.title_de
         return self.title
+
+    def shown_note(self, language: str) -> str:
+        """CV-displayable note, such as the ZAB recognition. Never `note`."""
+        return self.cv_note_de if language == "de" else self.cv_note_en
+
+    @property
+    def started(self) -> str:
+        """Sortable start month: "since 2025-01" and "2007-07 to ..." both work."""
+        found = re.search(r"(\d{4})-(\d{1,2})", str(self.dates or ""))
+        if not found:
+            return "0000-00"
+        return f"{found.group(1)}-{int(found.group(2)):02d}"
+
+    @property
+    def is_academic_degree(self) -> bool:
+        """Whether this entry is the university degree.
+
+        Read off the profile's own note rather than from list position, so
+        sorting the section cannot change which entry names the candidate's
+        professional qualification.
+        """
+        return "hochschulabschluss" in _fold(self.note) or "degree" in _fold(self.note)
 
 
 @dataclass
@@ -327,9 +385,13 @@ class EvidenceSelection:
             "language": self.language,
             "education": [{"title": item.title, "institution": item.institution,
                            "dates": item.dates} for item in self.education],
+            # A private-backed skill is deliberately absent: it has no citable
+            # provenance to offer a model, and its repository must never leave
+            # the machine. It still appears on the CV, which cites nothing.
             "evidenced_skills": [
                 {"skill": skill.name, "backed_by": "project" if skill.github_backed
-                 else "cv/training"} for skill in self.skills],
+                 else "cv/training"} for skill in self.skills
+                if not skill.private_backed],
             "public_projects": [
                 {"name": project.name, "demonstrates": list(project.points),
                  "limitation": project.caution} for project in self.projects],
@@ -397,6 +459,7 @@ def select_evidence(profile: Mapping[str, Any], *, job_id: str, role: str,
             excluded.append(f"skill '{name}' (not evidenced)")
             continue
         sources = []
+        private_only = False
         for item in raw.get("evidence", []) or []:
             text = str(item)
             if text.startswith("github:") and text[7:] not in allowed_repos:
@@ -404,8 +467,18 @@ def select_evidence(profile: Mapping[str, Any], *, job_id: str, role: str,
                 continue
             sources.append(text)
         if not sources:
-            excluded.append(f"skill '{name}' (only private evidence)")
-            continue
+            # The skill is evidenced, but only by a repository the candidate
+            # keeps private. Dropping it understated real ability: Python was
+            # absent from every CV although a Python project exists. It is
+            # kept and marked instead, so the CV may list the technology while
+            # the repository is never named and the skill never reaches a
+            # model prompt. A skill with NO evidence at all is still dropped.
+            if not (raw.get("evidence") or []):
+                excluded.append(f"skill '{name}' (no evidence)")
+                continue
+            private_only = True
+            excluded.append(f"skill '{name}' listed without a citable project "
+                            "(private repository, never named)")
         folded = _fold(name)
         relevance = 0
         if needed_fragments and any(fragment in folded for fragment in needed_fragments):
@@ -418,7 +491,9 @@ def select_evidence(profile: Mapping[str, Any], *, job_id: str, role: str,
             name=name, sources=tuple(sources),
             tracks=tuple(str(t) for t in raw.get("tracks", []) or []),
             confidence=str(raw.get("confidence", "")),
-            caution=str(raw.get("note", "")))))
+            caution=str(raw.get("note", "")),
+            name_de=str(raw.get("name_de", "")).strip(),
+            private_backed=private_only)))
     # Stable sort on the score alone, so equally relevant skills keep the
     # profile's own order rather than an arbitrary one.
     scored_skills.sort(key=lambda item: -item[0])
@@ -486,8 +561,14 @@ def select_evidence(profile: Mapping[str, Any], *, job_id: str, role: str,
         title=str(item.get("title", "")).strip(),
         institution=str(item.get("institution", "")).strip(),
         dates=str(item.get("dates", "")), note=str(item.get("note", "")),
-        title_de=str(item.get("title_de", "")).strip())
+        title_de=str(item.get("title_de", "")).strip(),
+        cv_note_de=str(item.get("cv_note_de", "")).strip(),
+        cv_note_en=str(item.get("cv_note_en", "")).strip())
         for item in profile.get("education", []) or [] if isinstance(item, Mapping)]
+    # Reverse chronological, as a German CV expects: the ongoing 42 Heilbronn
+    # programme first, the 2007 degree last. The profile's own order is not
+    # chronological and must not decide what a reader sees first.
+    education.sort(key=lambda item: item.started, reverse=True)
 
     # --- what the advert asked for ------------------------------------
     verdict = dict(assessment or {})

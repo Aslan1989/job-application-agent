@@ -18,6 +18,8 @@ data/description_cache.json
 data/contact.json
 output/
 logs/
+data/profile_photo.jpg
+
 
 # Bewerbungsfoto: local only, never committed, never sent to a model
 data/profile_photo.*

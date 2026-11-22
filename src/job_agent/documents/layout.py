@@ -97,7 +97,7 @@ class CvStyle:
     header_rule: bool = True
     allow_photo: bool = True
     allow_tables: bool = True
-    photo_height_mm: float = 42.0
+    photo_height_mm: float = 36.0
     tier: str = "regular"
 
     @property
@@ -133,7 +133,7 @@ class CvStyle:
             bullet_after=max(0.5, self.bullet_after - 0.5 * share),
             margin_top=max(12.0, self.margin_top - 3.0 * share),
             margin_bottom=max(12.0, self.margin_bottom - 3.0 * share),
-            photo_height_mm=max(34.0, self.photo_height_mm - 5.0 * share),
+            photo_height_mm=max(31.0, self.photo_height_mm - 5.0 * share),
         )
 
     def tiers(self) -> tuple["CvStyle", ...]:

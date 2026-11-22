@@ -22,7 +22,8 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Mapping, Sequence
 
-from .evidence import EvidenceSelection, display_requirement, localise
+from .evidence import (TRACK_TO_PROFILE, EvidenceSelection, _fold,
+                       display_requirement, localise)
 
 MAX_LETTER_CHARS = 2600  # Roughly one page of body text.
 
@@ -135,10 +136,10 @@ FOCUS_BY_TRACK = {
     "cpp_systems": {"de": "C/C++ und Systemprogrammierung", "en": "C/C++ and systems programming"},
     "linux_devops": {"de": "Linux, Docker und Infrastruktur", "en": "Linux, Docker and infrastructure"},
     "data_engineering": {"de": "SQL und Datenintegration", "en": "SQL and data integration"},
-    "it_consulting": {"de": "IT-Beratung und Prozessen", "en": "IT consulting and process work"},
+    "it_consulting": {"de": "IT-Beratung und Prozessoptimierung", "en": "IT consulting and process work"},
     "graduate_entry": {"de": "Softwareentwicklung und IT-Betrieb", "en": "software development and IT operations"},
     "software_generalist": {"de": "Backend-Entwicklung", "en": "backend development"},
-    "sap_abap": {"de": "IT-Prozessen", "en": "IT process work"},
+    "sap_abap": {"de": "IT-Prozesse", "en": "IT process work"},
     "unclassified": {"de": "Softwareentwicklung", "en": "software development"},
 }
 
@@ -149,29 +150,212 @@ ROLE_TITLES = {
            "Parcel delivery / logistics": "Logistics / parcel delivery"},
 }
 
-# Skill categories. Each bucket is matched against the FIRST segment of the
-# profile's own skill name ("Docker / Docker Compose / NGINX" -> "docker"), so
-# the grouping is deterministic and derived from the profile rather than
-# invented. The skill text itself is always printed verbatim: a category is a
-# label on existing evidence and never a new competency.
-SKILL_BUCKETS: tuple[tuple[str, tuple[str, ...]], ...] = (
+# Skill categories, and how a profile skill is distributed across them.
+#
+# The profile records skills as evidenced *bundles* ("Java 17 / Spring Boot /
+# JPA / Security"), because one evidence list backs the whole bundle. A CV
+# reads better split: the language under languages, the framework under
+# frameworks. Splitting a bundle on "/" asserts exactly what the bundle
+# asserts, decomposed -- it adds nothing. So every fragment is printed
+# **verbatim** from the profile and placed by the table below.
+#
+# Rules this table obeys, and must keep obeying:
+#   - A category is a label on existing evidence, never a competency.
+#   - A fragment is never translated or rewritten; "Configuration Parsing"
+#     stays "Configuration Parsing" in a German CV, as a technical term.
+#   - A fragment with no entry here falls back to its bundle's category, so a
+#     skill can never be silently dropped by being unrecognised.
+CATEGORY_ORDER: tuple[str, ...] = ("languages", "backend", "systems", "databases",
+                                   "ai", "devops", "testing")
+
+CATEGORY_LABELS = {
+    "de": {
+        "languages": "Programmiersprachen",
+        "backend": "Backend & Frameworks",
+        "systems": "Systemprogrammierung & Netzwerke",
+        "databases": "Datenbanken",
+        "ai": "KI & LLM",
+        "devops": "DevOps & Werkzeuge",
+        "testing": "Tests",
+        "other": "Weitere Kenntnisse",
+    },
+    "en": {
+        "languages": "Programming languages",
+        "backend": "Backend & frameworks",
+        "systems": "Systems programming & networking",
+        "databases": "Databases",
+        "ai": "AI & LLM",
+        "devops": "DevOps & tools",
+        "testing": "Testing",
+        "other": "Further skills",
+    },
+}
+
+# Fragment (casefolded, as the profile spells it) -> category.
+FRAGMENT_CATEGORY: dict[str, str] = {
+    # Languages.
+    "c": "languages", "c++": "languages", "java 17": "languages",
+    "java": "languages", "php 8": "languages", "php": "languages",
+    "python": "languages",
+    # Backend and frameworks.
+    "spring boot": "backend", "spring": "backend", "jpa": "backend",
+    "hibernate": "backend", "security": "backend", "oop": "backend",
+    "streamlit": "backend",
+    # Systems programming and networking.
+    "linux": "systems", "processes": "systems", "http": "systems",
+    "tcp sockets": "systems", "sockets": "systems",
+    "configuration parsing": "systems",
+    # Databases.
+    "mariadb": "databases", "mysql": "databases", "sql": "databases",
+    "pdo": "databases",
+    # AI and LLM.
+    "rag": "ai", "embeddings": "ai", "ollama": "ai", "osmnx": "ai",
+    "networkx": "ai",
+    # DevOps and tools.
+    "docker": "devops", "docker compose": "devops", "nginx": "devops",
+    "php-fpm": "devops", "bash": "devops", "git": "devops", "github": "devops",
+    # Testing.
+    "junit": "testing", "mockmvc": "testing", "phpunit": "testing",
+}
+
+# Which categories a vacancy's own career track puts first. The advert still
+# decides most of the order; this is the tie-breaking emphasis for a role
+# family, so a C/C++ vacancy leads with systems programming and a Java or PHP
+# vacancy leads with backend work, from the same unchanged skill inventory.
+TRACK_EMPHASIS: dict[str, tuple[str, ...]] = {
+    "cpp_systems": ("systems", "languages"),
+    "linux_devops": ("systems", "devops"),
+    "java_backend": ("backend", "languages"),
+    "php_web": ("backend", "languages"),
+    "software_generalist": ("backend", "languages"),
+    "graduate_entry": ("languages", "backend"),
+    "ai_engineering": ("ai", "languages"),
+    "python_automation": ("ai", "devops"),
+    "data_engineering": ("databases", "backend"),
+    "it_consulting": ("devops", "systems"),
+    "sap_abap": ("databases", "backend"),
+    "unclassified": (),
+}
+EMPHASIS_BONUS = (4, 2)
+
+# Fallback category for a whole bundle, by its leading term, used only when a
+# fragment is not in FRAGMENT_CATEGORY.
+BUNDLE_FALLBACK: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("ai", ("rag", "embedding", "embeddings", "ollama", "llm", "ki")),
-    ("quality", ("junit", "phpunit", "mockmvc", "pytest", "http", "tcp", "rest", "soap")),
-    ("data", ("mariadb", "mysql", "sql", "postgresql", "postgres", "oracle", "datenbank")),
-    ("infra", ("docker", "nginx", "bash", "git", "linux", "kubernetes", "apache",
-               "terraform", "ansible", "jenkins")),
-    ("programming", ("php", "java", "python", "c", "c++", "cpp", "kotlin", "spring",
-                     "javascript", "typescript", "go", "rust")),
+    ("testing", ("junit", "phpunit", "mockmvc", "pytest")),
+    ("systems", ("c", "c++", "cpp", "linux", "http", "tcp", "socket")),
+    ("databases", ("mariadb", "mysql", "sql", "postgresql", "postgres", "oracle")),
+    ("devops", ("docker", "nginx", "bash", "git", "kubernetes", "apache")),
+    ("backend", ("php", "java", "python", "spring", "kotlin", "jpa")),
 )
 
-BUCKET_LABELS = {
-    "de": {"programming": "Programmierung", "ai": "KI & LLM", "data": "Datenbanken",
-           "infra": "Infrastruktur & Werkzeuge", "quality": "Tests & Schnittstellen",
-           "other": "Weitere Kenntnisse"},
-    "en": {"programming": "Programming", "ai": "AI & LLM", "data": "Databases",
-           "infra": "Infrastructure & tools", "quality": "Testing & interfaces",
-           "other": "Further skills"},
-}
+
+def _fragments(name: str) -> list[str]:
+    """Split a profile skill bundle into its technologies, verbatim."""
+    return [part.strip() for part in str(name or "").split("/") if part.strip()]
+
+
+def _fallback_category(name: str) -> str:
+    head = _fragments(name)[0].casefold() if _fragments(name) else ""
+    token = re.split(r"\s+", head)[0].strip(".-+") if head else ""
+    for category, keywords in BUNDLE_FALLBACK:
+        if token and token in keywords:
+            return category
+        if any(head.startswith(keyword) for keyword in keywords):
+            return category
+    return "other"
+
+
+def _cue_matches(fragment: str, cue: str) -> bool:
+    """Whether an advert cue names this technology.
+
+    Word-boundary matched in both directions, so "Java" is not raised by an
+    advert asking for "Javascript" -- the same trap `rank_jobs` documents. A
+    one- or two-character fragment ("C") must match exactly or be bounded, so
+    it cannot be triggered by "Docker".
+    """
+    if not fragment or not cue:
+        return False
+    if fragment == cue:
+        return True
+    boundary = r"(?<![a-z0-9+#]){}(?![a-z0-9+#])"
+    if re.search(boundary.format(re.escape(fragment)), cue):
+        return True
+    if len(fragment) <= 2:
+        return False
+    return bool(re.search(boundary.format(re.escape(cue)), fragment))
+
+
+def _fragment_key(item: tuple[int, int, int, int, str]) -> tuple[int, int, int, int]:
+    """Sort key for one fragment: relevance, native category, profile order."""
+    return (-item[0], item[1], item[2], item[3])
+
+
+def skill_rows(evidence: EvidenceSelection, language: str, *,
+               track: str = "") -> tuple[tuple[str, str], ...]:
+    """Group the selected skills into compact, vacancy-ordered category rows.
+
+    Nothing is discarded: every evidenced skill fragment is printed, whatever
+    the vacancy. What the vacancy changes is the *order* -- which category
+    leads and which technology comes first inside it -- so a C/C++ advert sees
+    systems programming first and a Java advert sees backend first, from one
+    unchanged inventory.
+    """
+    labels = CATEGORY_LABELS.get(language, CATEGORY_LABELS["de"])
+    chosen_track = track or evidence.track
+    wanted = set(TRACK_TO_PROFILE.get(chosen_track, ()))
+    cues = [_fold(item) for item in evidence.matched_requirements if str(item).strip()]
+
+    # One entry per fragment: (score, borrowed?, bundle index, position, text).
+    # "borrowed" marks a fragment whose category is not its bundle's own, like
+    # PDO arriving in Datenbanken from the PHP bundle. Native technologies lead
+    # their category, which is why Datenbanken opens with MariaDB.
+    grouped: dict[str, list[tuple[int, int, int, int, str]]] = {}
+    for index, skill in enumerate(evidence.skills):
+        bundle_bonus = 2 if wanted & set(skill.tracks) else 0
+        home = _fallback_category(skill.name)
+        # The English fragment is the key for categorisation and for the fact
+        # checker; only the printed half is localised. See SkillEvidence.aligned.
+        for position, (key, shown) in enumerate(skill.aligned(language)):
+            folded = _fold(key)
+            category = FRAGMENT_CATEGORY.get(folded, home)
+            score = bundle_bonus + (3 if any(_cue_matches(folded, cue)
+                                             for cue in cues) else 0)
+            grouped.setdefault(category, []).append(
+                (score, 0 if category == home else 1, index, position, shown))
+
+    emphasis = TRACK_EMPHASIS.get(chosen_track, ())
+    rows: list[tuple[int, int, str, str]] = []
+    for category, items in grouped.items():
+        bonus = next((EMPHASIS_BONUS[position]
+                      for position, name in enumerate(emphasis[:len(EMPHASIS_BONUS)])
+                      if name == category), 0)
+        rank = max(item[0] for item in items) + bonus
+        # Duplicates across bundles (PHP appears twice) collapse to the best.
+        best: dict[str, tuple[int, int, int, int, str]] = {}
+        for item in items:
+            key = _fold(item[4])
+            if key not in best or _fragment_key(item) < _fragment_key(best[key]):
+                best[key] = item
+        # A bundle's fragments stay contiguous and in the profile's own order,
+        # so a category reads as a list of technologies rather than an
+        # interleaving of two bundles. The most relevant bundle leads.
+        bundle_rank = {}
+        for item in best.values():
+            key = (item[1], item[2])
+            bundle_rank[key] = max(bundle_rank.get(key, item[0]), item[0])
+        ordered = sorted(
+            best.values(),
+            key=lambda item: (-bundle_rank[(item[1], item[2])], item[1],
+                              item[2], item[3]))
+        tie = (CATEGORY_ORDER.index(category) if category in CATEGORY_ORDER
+               else len(CATEGORY_ORDER))
+        rows.append((rank, tie, labels.get(category, category),
+                     "  \u00b7  ".join(item[4] for item in ordered)))
+
+    rows.sort(key=lambda item: (-item[0], item[1]))
+    return tuple((label, value) for _, _, label, value in rows)
+
 
 # Gender markers and "all genders" suffixes that belong in a job advert but not
 # in a CV headline.
@@ -244,43 +428,16 @@ def _qualifier(evidence: EvidenceSelection) -> str:
     "Wirtschaftsinformatiker" because the profile says so -- not because this
     module decided on a degree. No German degree title or grade is implied.
     """
-    for item in evidence.education:
-        first = str(item.title or "").split("/")[0].strip()
-        if first:
-            return first
-    return ""
-
-
-def _skill_bucket(name: str) -> str:
-    """Which category a profile skill belongs to, by its own leading term."""
-    head = re.split(r"[/,]", str(name or ""))[0].strip().casefold()
-    head_token = re.split(r"\s+", head)[0].strip(".-+") if head else ""
-    for bucket, keywords in SKILL_BUCKETS:
-        if head_token and head_token in keywords:
-            return bucket
-        if any(head.startswith(keyword) for keyword in keywords):
-            return bucket
-    return "other"
-
-
-def skill_rows(evidence: EvidenceSelection, language: str) -> tuple[tuple[str, str], ...]:
-    """Group the selected skills into compact "category: skills" rows.
-
-    Categories keep the relevance order `select_evidence` produced: the bucket
-    holding the most relevant skill comes first, so the vacancy's own
-    priorities survive the grouping.
-    """
-    labels = BUCKET_LABELS.get(language, BUCKET_LABELS["de"])
-    order: list[str] = []
-    grouped: dict[str, list[str]] = {}
-    for index, skill in enumerate(evidence.skills):
-        bucket = _skill_bucket(skill.name)
-        if bucket not in grouped:
-            grouped[bucket] = []
-            order.append(bucket)
-        grouped[bucket].append(skill.name)
-    return tuple((labels.get(bucket, bucket), "  \u00b7  ".join(grouped[bucket]))
-                 for bucket in order if grouped[bucket])
+    degree = next((item for item in evidence.education if item.is_academic_degree),
+                  None)
+    if degree is None:
+        # Oldest entry, which is the qualification a CV leads with. Never
+        # `education[0]`: the section is sorted newest-first for the reader.
+        degree = min(evidence.education, key=lambda item: item.started,
+                     default=None)
+    if degree is None:
+        return ""
+    return str(degree.title or "").split("/")[0].strip()
 
 
 def untranslated_descriptions(evidence: EvidenceSelection) -> list[str]:
@@ -311,7 +468,12 @@ def build_cv(evidence: EvidenceSelection, *, role: str = "",
     skills = CvSection(heading=labels["skills"], rows=skill_rows(evidence, language))
 
     project_entries = [
-        CvEntry(title=project.name, link=project.url,
+        # "github.com/<owner>/<repo>" rather than the full https URL: it is
+        # how a CV conventionally cites a repository, it is unambiguous, and
+        # it is short enough to sit beside the project name instead of
+        # occupying a line of its own. The review report keeps the full URL.
+        CvEntry(title=project.name,
+                link=f"github.com/{project.repository}" if project.repository else "",
                 bullets=project.described(language))
         for project in evidence.projects[:max(1, max_projects)]
     ]

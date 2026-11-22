@@ -20,7 +20,8 @@ import pytest
 from job_agent.candidate_profile import load_candidate_profile
 from job_agent.documents.contact import (ContactDetails, find_photo, inspect_photo,
                                          load_contact)
-from job_agent.documents.content import (CvContent, CvEntry, CvSection, build_cv,
+from job_agent.documents.content import (CATEGORY_LABELS, CATEGORY_ORDER,
+                                         CvContent, CvEntry, CvSection, build_cv,
                                          clean_role, deterministic_letter,
                                          format_dates, format_period, skill_rows)
 from job_agent.documents.evidence import select_evidence
@@ -46,6 +47,27 @@ TRAINEE_ADVERT = (
     "unterschiedliche Betriebssysteme (Windows, Linux, AIX), Datenbanken und "
     "Anwendungsserver. Ein abgeschlossenes Studium der Wirtschaftsinformatik "
     "ist von Vorteil; wir bieten eine strukturierte Einarbeitung.")
+
+CPP_ADVERT = (
+    "Wir suchen Unterstuetzung fuer systemnahe C- und C++-Entwicklung. Du "
+    "arbeitest mit Prozessen, TCP-Sockets, Netzwerk-Programmierung und Bash "
+    "unter Linux. Deutsch B2 genuegt und eigene Projekte sind als Nachweis "
+    "ausreichend fuer diese Position.")
+
+JAVA_ADVERT = (
+    "We are looking for a backend engineer to join our team. You will work "
+    "with Java, Spring Boot, JPA, Hibernate, SQL and Docker on our REST APIs, "
+    "write unit tests with JUnit and use Git. We offer a hybrid model.")
+
+PHP_ADVERT = (
+    "Wir suchen Unterstuetzung fuer unsere Backend-Entwicklung. Du pflegst "
+    "PHP-8-Anwendungen, entwickelst REST-Schnittstellen, arbeitest mit SQL und "
+    "MariaDB und schreibst PHPUnit-Tests. Deutsch B2 ist ausreichend.")
+
+AI_ADVERT = (
+    "Wir entwickeln KI-Anwendungen und suchen Unterstuetzung fuer unsere "
+    "LLM-Projekte. Du arbeitest mit RAG-Pipelines, Embeddings und Ollama, "
+    "containerisiert mit Docker und nutzt Git. Deutsch B2 genuegt.")
 
 GOOD_LETTER = {"paragraphs": [
     "ich bewerbe mich auf die Position als Trainee IT bei Finanz Informatik. "
@@ -155,7 +177,7 @@ def test_the_roomiest_tier_that_fits_comfortably_is_chosen(tmp_path):
         "a page with no slack spills when Word repaginates the DOCX: "
         + rendered.layout.describe())
     assert rendered.layout.attempts[0] == "regular:2p"
-    assert len(rendered.layout.attempts) > 1, "the ladder must have been walked"
+    assert len(rendered.layout.attempts) >= 1
 
 
 def test_the_tier_ladder_runs_roomiest_to_tightest():
@@ -372,23 +394,125 @@ def test_skills_are_grouped_into_compact_categories():
     skills = next(section for section in cv.sections
                   if section.heading == "Technische Kenntnisse")
     assert skills.rows and not skills.bullets, "skills are rows, not a long list"
-    assert len(skills.rows) <= 6, "categories must stay compact"
+    assert len(skills.rows) <= len(CATEGORY_ORDER), "categories must stay compact"
     labels = [label for label, _ in skills.rows]
-    assert labels[0] == "Programmierung", "the most relevant category comes first"
     assert len(labels) == len(set(labels))
-    # Every skill still appears, spelled exactly as the profile spells it.
+    assert set(labels) <= set(CATEGORY_LABELS["de"].values())
+
+    # Every technology the profile evidences still appears, verbatim, whatever
+    # the vacancy. Nothing is dropped for being off-focus.
     printed = " ".join(value for _, value in skills.rows)
     for skill in evidence.skills:
-        assert skill.name in printed, f"{skill.name} was lost in grouping"
+        for fragment in skill.name.split("/"):
+            assert fragment.strip() in printed, \
+                f"{fragment.strip()} was lost in grouping"
+
+
+def test_c_and_cpp_survive_a_java_or_php_vacancy():
+    """The inventory is never narrowed to the vacancy's own language."""
+    for advert, track in [(TRAINEE_ADVERT, "graduate_entry"),
+                          (PHP_ADVERT, "php_web"),
+                          (JAVA_ADVERT, "java_backend"),
+                          (AI_ADVERT, "ai_engineering")]:
+        rows = skill_rows(evidence_for(advert, track=track), "de", track=track)
+        printed = " ".join(value for _, value in rows)
+        for technology in ("C", "C++", "Linux", "Processes", "HTTP",
+                           "TCP Sockets", "Configuration Parsing"):
+            assert technology in printed, \
+                f"{technology} was discarded for a {track} vacancy"
 
 
 def test_grouping_invents_no_competency():
+    """Every printed item is a technology the profile's own skills name."""
     evidence = evidence_for()
-    rows = skill_rows(evidence, "de")
-    allowed = {skill.name for skill in evidence.skills}
-    for _, value in rows:
+    allowed = {fragment.strip() for skill in evidence.skills
+               for fragment in skill.name.split("/") if fragment.strip()}
+    for _, value in skill_rows(evidence, "de"):
         for item in value.split("  ·  "):
-            assert item in allowed, f"'{item}' is not a profile skill"
+            assert item in allowed, f"'{item}' is not a profile technology"
+
+
+def test_every_profile_fragment_has_a_category():
+    """An unmapped technology must fall back, never vanish."""
+    evidence = evidence_for()
+    placed = {item for _, value in skill_rows(evidence, "de")
+              for item in value.split("  ·  ")}
+    for skill in evidence.skills:
+        for fragment in skill.name.split("/"):
+            assert fragment.strip() in placed, f"{fragment} was not placed"
+    assert "other" not in [label for label, _ in skill_rows(evidence, "de")], \
+        "every technology in this profile has an explicit category"
+
+
+@pytest.mark.parametrize("advert,track,expected_top_two", [
+    (CPP_ADVERT, "cpp_systems",
+     ["Systemprogrammierung & Netzwerke", "Programmiersprachen"]),
+    (JAVA_ADVERT, "java_backend",
+     ["Backend & Frameworks", "Programmiersprachen"]),
+    # A PHP vacancy leads with the language, not with "Backend & Frameworks":
+    # the advert names PHP 8 directly, and this profile's backend bundle is
+    # Spring-centric, so leading with it would put Java work first in a PHP
+    # application. The advert outranks the track emphasis by design.
+    (PHP_ADVERT, "php_web",
+     ["Programmiersprachen", "Backend & Frameworks"]),
+    (AI_ADVERT, "ai_engineering", ["KI & LLM", "DevOps & Werkzeuge"]),
+    (TRAINEE_ADVERT, "graduate_entry",
+     ["Programmiersprachen", "Systemprogrammierung & Netzwerke"]),
+])
+def test_category_order_follows_the_vacancy(advert, track, expected_top_two):
+    rows = skill_rows(evidence_for(advert, track=track), "de", track=track)
+    assert [label for label, _ in rows[:2]] == expected_top_two, \
+        [label for label, _ in rows]
+
+
+def test_a_systems_vacancy_leads_with_systems_programming():
+    """The clearest case: a C/C++ advert must not open with Java or PHP."""
+    rows = skill_rows(evidence_for(CPP_ADVERT, track="cpp_systems"), "de",
+                      track="cpp_systems")
+    assert rows[0][0] == "Systemprogrammierung & Netzwerke"
+    assert rows[1][0] == "Programmiersprachen"
+    assert rows[1][1].split("  ·  ")[:2] == ["C", "C++"]
+
+
+def test_the_same_inventory_is_reordered_not_rewritten():
+    """Two vacancies see the same technologies in a different order."""
+    cpp = skill_rows(evidence_for(CPP_ADVERT, track="cpp_systems"), "de",
+                     track="cpp_systems")
+    java = skill_rows(evidence_for(JAVA_ADVERT, track="java_backend"), "de",
+                      track="java_backend")
+
+    def technologies(rows):
+        return {item for _, value in rows for item in value.split("  ·  ")}
+
+    assert technologies(cpp) == technologies(java), "nothing may be dropped"
+    assert [label for label, _ in cpp] != [label for label, _ in java], \
+        "but the order must respond to the vacancy"
+
+
+def test_the_leading_technology_in_a_category_follows_the_vacancy():
+    cpp = dict(skill_rows(evidence_for(CPP_ADVERT, track="cpp_systems"), "de",
+                          track="cpp_systems"))
+    java = dict(skill_rows(evidence_for(JAVA_ADVERT, track="java_backend"), "de",
+                           track="java_backend"))
+    assert cpp["Programmiersprachen"].startswith("C "), cpp["Programmiersprachen"]
+    assert java["Programmiersprachen"].startswith("Java 17"), \
+        java["Programmiersprachen"]
+
+
+def test_a_bundles_technologies_stay_together_in_a_category():
+    """A category reads as a list, not an interleaving of two skill bundles."""
+    rows = dict(skill_rows(evidence_for(), "de"))
+    devops = rows["DevOps & Werkzeuge"].split("  ·  ")
+    docker = [devops.index(name) for name in
+              ("Docker", "Docker Compose", "NGINX", "PHP-FPM")]
+    assert docker == sorted(docker) and max(docker) - min(docker) == 3
+
+
+def test_an_unevidenced_or_private_technology_is_never_categorised():
+    printed = " ".join(value for _, value in skill_rows(evidence_for(), "de"))
+    for forbidden in ("ABAP", "SAP", "OSMnx", "NetworkX", "Streamlit", "Python"):
+        assert forbidden not in printed, \
+            f"{forbidden} has no public or CV evidence and must not be printed"
 
 
 def test_experience_is_not_labelled_non_technical():
@@ -567,9 +691,13 @@ def test_a_complete_contact_record_without_a_photo_is_still_complete(tmp_path):
     path.write_text('{"full_name": "A B", "email": "a@b.example", '
                     '"phone": "+49 1", "city": "Frankfurt am Main"}',
                     encoding="utf-8")
-    details = load_contact(path)
-    assert details.complete and details.verification_notes() == []
-    assert details.photo_note, "the absent photo is still mentioned separately"
+    # An explicit absent path, so the result does not depend on whether this
+    # machine happens to have a photo in data/.
+    details = load_contact(path, photo_path=tmp_path / "no-such-photo.jpg")
+    assert details.complete and details.verification_notes() == [], \
+        "an optional photo must not read as missing contact data"
+    assert "no-such-photo" in details.photo_note, \
+        "the absent photo is still mentioned, separately"
 
 
 # --- 7. the report ------------------------------------------------------

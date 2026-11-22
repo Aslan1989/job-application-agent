@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from dataclasses import replace
+from datetime import date, timedelta
 
 from job_agent.cache import DescriptionCache
 from job_agent.candidate_profile import load_candidate_profile
@@ -42,6 +43,16 @@ ASSESSMENT = {
     "unknown_requirements": ["Exact German degree title"], "critical_gaps": [],
     "language": "German B2", "track": "backend_java", "eligibility": "eligible",
 }
+
+
+# The cities the mock Profile tab advertises. `run_daily` reads them from that
+# tab and passes them to `discover_jobs`, and a real single-shot adapter is
+# constructed with the same list, so the doubles below use it too. Derived from
+# the double rather than hard-coded, so the two cannot drift apart.
+PROFILE_CITIES: tuple[str, ...] = tuple(
+    part.strip()
+    for row in StatefulValues().profile if row[0] == "Locations"
+    for part in str(row[1]).split(";") if part.strip())
 
 
 def profile():
@@ -75,9 +86,12 @@ class FakeSource:
         self.fail_describe = set(fail_describe)
         self.discover_calls = 0
         self.describe_calls = 0
+        # (city argument, configured cities) for every discover() call.
+        self.cities_seen: list[tuple[str, tuple[str, ...]]] = []
 
     def discover(self, *, term, city, size):
         self.discover_calls += 1
+        self.cities_seen.append((city, ()))
         if self.fail_discover:
             raise RuntimeError("source unavailable")
         # Mirror the real adapters, which screen loosely and let the pipeline
@@ -109,10 +123,24 @@ def repo_for(values: StatefulValues) -> GoogleSheetsRepository:
     return GoogleSheetsRepository(StatefulService(values), "test-sheet")
 
 
+# `search_plan` rotates each query's term, city AND career track by
+# `date.today().toordinal()`. That rotation is production behaviour and is
+# covered on its own by the date-sweep tests at the end of this file. Every
+# other test pins the plan date, because a test that does not control that
+# input is not deterministic: with a free-running date these tests passed on
+# roughly one day in three. The two ways it bit:
+#   - the city rotation decided what a per-query source was asked for;
+#   - the track rotation decided each posting's track, and `apply_track_quota`
+#     gives a weight-1 track fewer slots than a weight-3 one, so the exact
+#     candidate count moved from day to day.
+PLAN_DAY = date(2026, 11, 21)
+
+
 def run(values, *, sources, provider=None, write=False, cache=None, **kwargs):
     return run_daily(repository=repo_for(values), sources=sources, profile=profile(),
                      provider=provider, write=write, cache=cache,
-                     max_searches=kwargs.pop("max_searches", 3), **kwargs)
+                     max_searches=kwargs.pop("max_searches", 3),
+                     today=kwargs.pop("today", PLAN_DAY), **kwargs)
 
 
 # --- discovery and deduplication ------------------------------------------
@@ -607,17 +635,60 @@ def test_unwritable_cache_does_not_discard_a_completed_run(tmp_path):
 
 
 class SingleShotSource(FakeSource):
-    """A whole-board source: one pass per run, term ignored (ATS, career page)."""
+    """A whole-board source: one pass per run, term and per-query city ignored.
+
+    Mirrors the real single-shot adapters (Greenhouse, Lever, Ashby,
+    Arbeitnow, career page, Brave). Every one of them is constructed with the
+    configured cities and gates on `(city, *self.cities)` with empty parts
+    dropped -- see `collectors/ats.py`. That is what makes a whole-board fetch
+    independent of which city the day's first planned query happened to carry.
+
+    The earlier double gated on the pipeline's per-query `city` alone, which
+    no real adapter does. Because `search_plan` rotates that city by date, the
+    double silently returned nothing on the two days in three when the
+    rotation did not start at its fixtures' city, and eight tests failed for
+    reasons that had nothing to do with the code under test.
+    """
+
+    single_shot = True
+
+    def __init__(self, key, jobs, descriptions=None, *, cities=PROFILE_CITIES,
+                 **kwargs):
+        super().__init__(key, jobs, descriptions, **kwargs)
+        self.cities = tuple(cities)
+
+    def discover(self, *, term="", city="", size=100):
+        self.discover_calls += 1
+        self.cities_seen.append((city, tuple(self.cities)))
+        if self.fail_discover:
+            raise RuntimeError("source unavailable")
+        wanted = tuple(part for part in (city, *self.cities) if part)
+        return [job for job in self.jobs
+                if location_matches(job.location, wanted,
+                                    allow_remote_germany=True)][:size]
+
+
+class CityOnlySingleShotSource(FakeSource):
+    """A whole-board source that trusts ONLY the city the pipeline passes.
+
+    Deliberately has no configured city list, so it cannot compensate for a
+    narrow argument. It exists to pin the production contract: the pipeline
+    must not hand a once-per-run source a single calendar-rotated city, or a
+    source shaped like this one loses its whole board.
+    """
 
     single_shot = True
 
     def discover(self, *, term="", city="", size=100):
         self.discover_calls += 1
+        self.cities_seen.append((city, ()))
         if self.fail_discover:
             raise RuntimeError("source unavailable")
-        return [job for job in self.jobs
-                if location_matches(job.location, (city,),
-                                    allow_remote_germany=True)][:size]
+        if city:
+            return [job for job in self.jobs
+                    if location_matches(job.location, (city,),
+                                        allow_remote_germany=True)][:size]
+        return list(self.jobs)[:size]
 
 
 def test_single_shot_source_is_queried_once_per_run():
@@ -637,7 +708,8 @@ def test_remote_germany_postings_need_the_flag():
     with_flag = run_daily(
         repository=repo_for(StatefulValues()),
         sources=[SingleShotSource("greenhouse", [remote])], profile=profile(),
-        provider=None, write=False, max_searches=3, allow_remote_germany=True)
+        provider=None, write=False, max_searches=3, allow_remote_germany=True,
+        today=PLAN_DAY)
     assert with_flag.new == 1
 
 
@@ -791,7 +863,7 @@ def test_potential_band_and_eligibility_override(score, eligibility, expected):
 def test_potential_threshold_is_configurable():
     for minimum, expected in ((65, "Potential"), (75, "Skip")):
         values = StatefulValues()
-        run_daily(repository=repo_for(values),
+        run_daily(repository=repo_for(values), today=PLAN_DAY,
                   sources=[FakeSource("ba", [make_job()])], profile=profile(),
                   provider=FakeModel(assessment_at(70)), write=True,
                   max_searches=3, potential_min=minimum)
@@ -862,7 +934,7 @@ def test_fill_unused_recovers_the_capped_slots():
                                 SingleShotSource("greenhouse", board)],
                        profile=profile(), provider=None, write=False,
                        max_searches=3, max_new=10, source_default_share=0.5,
-                       source_fill_leftover=True)
+                       source_fill_leftover=True, today=PLAN_DAY)
     assert report.new == 10, "unused capacity is handed back out"
 
 
@@ -979,3 +1051,156 @@ def test_evidence_ranking_reads_the_best_matching_adverts_first():
     evidenced = make_job("ba", "10001-0002-S", role="Java Spring Boot Entwickler")
     ordered = rank_jobs([unrelated, evidenced], skill_terms=terms)
     assert ordered[0].role.startswith("Java")
+
+
+# --- regression: the per-query city must never reach a whole-board source ---
+#
+# `search_plan` rotates each query's term, city and track by
+# `date.today().toordinal()`. A single-shot source is fetched once per run, so
+# handing it `query.city` gave it whichever city the day's *first* planned
+# query happened to carry. Every real adapter compensated by gating on its own
+# configured cities, so production results were stable -- but the argument was
+# a trap, and a source shaped like `CityOnlySingleShotSource` lost its entire
+# board on the two days in three when the rotation did not start at its city.
+# `discover_jobs` now passes no city to a single-shot source.
+
+ROTATION_DAYS = 21  # Comfortably longer than any term/city/track cycle.
+
+
+def rotation_days(count: int = ROTATION_DAYS):
+    return [date(2026, 11, 19) + timedelta(days=offset) for offset in range(count)]
+
+
+def ba_jobs_across_cities(count: int = 12):
+    """BA searches each city server-side, so its hits legitimately span them."""
+    return [make_job(external_id=f"10001-{index:04d}-S",
+                     role=f"Python Developer {index}",
+                     city=PROFILE_CITIES[index % len(PROFILE_CITIES)])
+            for index in range(count)]
+
+
+def test_a_whole_board_source_is_given_no_per_query_city():
+    """The contract, asserted directly on what each source was asked for."""
+    board = SingleShotSource("ashby", [make_job("ashby", "acme-1", role="AI Engineer")])
+    feed = FakeSource("ba", ba_jobs_across_cities(3))
+    run(StatefulValues(), sources=[feed, board], write=False, max_searches=6)
+
+    assert board.discover_calls == 1, "a whole board is fetched once per run"
+    assert [city for city, _ in board.cities_seen] == [""], (
+        "a single-shot source must receive no per-query city, or its one fetch "
+        "depends on which city the day's first query happened to carry")
+    assert all(city for city, _ in feed.cities_seen), (
+        "a per-query source still searches by city; BA has a server-side city "
+        "filter and must keep using it")
+    assert len({city for city, _ in feed.cities_seen}) > 1, \
+        "and it still rotates across the configured cities"
+
+
+@pytest.mark.parametrize("day", rotation_days())
+def test_a_board_trusting_only_the_passed_city_still_yields_its_postings(day):
+    """The regression test for the bug itself, on every day of the rotation."""
+    board = CityOnlySingleShotSource(
+        "greenhouse", [make_job("greenhouse", "gh-1", role="Java Spring Developer")])
+    report = run(StatefulValues(), sources=[board], write=False, max_searches=9,
+                 today=day)
+    assert board.discover_calls == 1
+    assert report.fetched == 1, f"{day}: the board was starved by its city argument"
+    assert report.new == 1, f"{day}: {report.fetched} fetched but {report.new} new"
+
+
+@pytest.mark.parametrize("day", rotation_days())
+def test_multi_source_discovery_is_stable_across_the_date_rotation(day):
+    """Greenhouse, Ashby and BA together must produce results on every day."""
+    greenhouse = SingleShotSource(
+        "greenhouse", [make_job("greenhouse", "gh-1", role="Java Spring Developer")])
+    ashby = SingleShotSource(
+        "ashby", [make_job("ashby", "as-1", role="AI Automation Engineer")])
+    feed = FakeSource("ba", ba_jobs_across_cities())
+    report = run(StatefulValues(), sources=[feed, ashby, greenhouse], write=False,
+                 max_searches=9, max_new=12, today=day)
+
+    assert report.by_source.get("greenhouse", 0) == 1, f"{day}: greenhouse silent"
+    assert report.by_source.get("ashby", 0) == 1, f"{day}: ashby silent"
+    assert report.by_source.get("ba", 0) >= 1, f"{day}: BA silent"
+    assert report.new == sum(report.by_source.values())
+    assert not report.errors, f"{day}: {report.errors}"
+
+
+@pytest.mark.parametrize("day", rotation_days())
+def test_source_fairness_holds_on_every_day_of_the_rotation(day):
+    """The largest feed is capped whenever another source contributes."""
+    board = SingleShotSource(
+        "greenhouse", [make_job("greenhouse", f"gh-{index}", role=f"Java Developer {index}")
+                       for index in range(2)])
+    report = run(StatefulValues(), sources=[FakeSource("ba", ba_jobs_across_cities(20)),
+                                            board],
+                 write=False, max_new=10, max_searches=9,
+                 source_default_share=0.5, today=day)
+    assert report.by_source.get("greenhouse", 0) >= 1, f"{day}: board contributed nothing"
+    assert report.by_source.get("ba", 0) <= 5, (
+        f"{day}: BA took {report.by_source.get('ba')} of a 10-job budget at a "
+        "0.5 share; a cap that only applies on some days is not a cap")
+    assert report.source_capped.get("ba", 0) > 0, f"{day}: cap not recorded"
+
+
+@pytest.mark.parametrize("day", rotation_days(7))
+def test_dedup_holds_across_the_date_rotation(day):
+    """The same vacancy on a board and in a feed stays one row, every day."""
+    shared_url = "https://boards.greenhouse.io/acme/jobs/dup-1"
+    board = SingleShotSource("greenhouse", [
+        make_job("greenhouse", "dup-1", role="Java Spring Developer", url=shared_url)])
+    twin = SingleShotSource("ashby", [
+        make_job("ashby", "dup-1-other", role="Java Spring Developer", url=shared_url)])
+    report = run(StatefulValues(), sources=[board, twin], write=False,
+                 max_searches=9, today=day)
+    assert report.fetched == 2, f"{day}: both sources must be reached"
+    assert report.duplicates == 1, f"{day}: dedup did not collapse the pair"
+    assert report.new == 1
+
+
+@pytest.mark.parametrize("day", rotation_days(7))
+def test_backlog_is_scored_before_new_discoveries_on_every_day(day):
+    """Saved `Found` rows keep priority whatever the day's query rotation."""
+    rows = [[f"ba:8888{index}-X", "2026-11-20", "ACME", f"Backlog Developer {index}",
+             "Frankfurt am Main", "Unknown", "BA",
+             f"https://www.arbeitsagentur.de/jobsuche/jobdetail/8888{index}-X",
+             "", "", "", "Unknown", "Found", "Not reviewed", "", "", "", "", ""]
+            for index in range(4)]
+    values = StatefulValues(rows=rows)
+    scored: list[str] = []
+
+    class Recorder(FakeModel):
+        def complete(self, messages):
+            payload = json.loads(messages[1]["content"].split("\n", 1)[1])
+            scored.append(payload["job"]["title"])
+            return super().complete(messages)
+
+    run(values, sources=[FakeSource("ba", []),
+                         SingleShotSource("ashby", [
+                             make_job("ashby", "new-1", role="AI Automation Engineer")])],
+        provider=Recorder(), write=True, max_matches=2, today=day)
+    assert len(scored) == 2, f"{day}: scored {scored}"
+    assert all("Backlog Developer" in title for title in scored), \
+        f"{day}: new discoveries jumped the backlog: {scored}"
+
+
+def test_the_leftover_fill_is_reached_now_that_a_board_contributes():
+    """`source_fill_leftover` was unreachable while the board returned nothing.
+
+    With one source contributing, `apply_source_quota` returns early and never
+    defers anything, so the leftover path was dead code in practice. A real
+    second source is what exercises it.
+    """
+    board = SingleShotSource("greenhouse",
+                             [make_job("greenhouse", "gh-0", role="Java Developer")])
+    strict = run(StatefulValues(), sources=[FakeSource("ba", ba_jobs_across_cities(20)),
+                                            board],
+                 write=False, max_new=10, max_searches=9, source_default_share=0.5)
+    generous = run(StatefulValues(), sources=[FakeSource("ba", ba_jobs_across_cities(20)),
+                                              board],
+                   write=False, max_new=10, max_searches=9, source_default_share=0.5,
+                   source_fill_leftover=True)
+    assert strict.by_source.get("ba", 0) <= 5
+    assert generous.by_source.get("ba", 0) > strict.by_source.get("ba", 0), \
+        "unused board capacity must be handed back to the feed that has jobs"
+    assert generous.new > strict.new

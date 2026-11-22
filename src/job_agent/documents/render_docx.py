@@ -235,9 +235,14 @@ def render_cv(cv: CvContent, contact: ContactDetails, path: Path | str, *,
         for bullet in section.bullets:
             _bullet(document, bullet, style)
         for entry in section.entries:
-            _entry_heading(document, entry.title, entry.period, style,
+            # A project has no dates but does have a repository, so the
+            # right-hand slot carries the link and the entry costs one line
+            # instead of two.
+            trailing = entry.period or (entry.link if not entry.subtitle else "")
+            _entry_heading(document, entry.title, trailing, style,
                            width_mm=width_mm)
-            meta = " | ".join(part for part in (entry.subtitle, entry.link) if part)
+            meta = " | ".join(part for part in (entry.subtitle, entry.link)
+                              if part and part != trailing)
             if meta:
                 _paragraph(document, meta, size=style.meta_pt, colour=style.muted,
                            space_after=1)
@@ -300,15 +305,24 @@ def render_letter(letter: LetterContent, contact: ContactDetails,
 
 
 def read_docx_text(path: Path | str) -> str:
-    """Read a DOCX back as plain text. Used to verify the output is readable.
+    """Read a DOCX back as plain text, in document order.
 
     Table cells are included, because the `modern` header puts the name and the
-    headline in a borderless layout table.
+    headline in a borderless layout table — and they are read *where they
+    appear*, not appended at the end. `document.paragraphs` skips table
+    content and `document.tables` comes after it, so the naive combination
+    reported the header below the last section.
     """
     document = Document(str(path))
-    lines = [paragraph.text for paragraph in document.paragraphs]
-    for table in document.tables:
-        for row in table.rows:
-            for cell in row.cells:
-                lines.extend(paragraph.text for paragraph in cell.paragraphs)
+    body = document.element.body
+    paragraphs = {paragraph._p: paragraph for paragraph in document.paragraphs}
+    tables = {table._tbl: table for table in document.tables}
+    lines: list[str] = []
+    for child in body.iterchildren():
+        if child in paragraphs:
+            lines.append(paragraphs[child].text)
+        elif child in tables:
+            for row in tables[child].rows:
+                for cell in row.cells:
+                    lines.extend(item.text for item in cell.paragraphs)
     return "\n".join(lines)

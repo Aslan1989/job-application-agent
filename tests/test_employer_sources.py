@@ -291,3 +291,117 @@ def test_expired_posting_is_dropped_but_a_missing_date_is_not():
 
     undated = {k: v for k, v in JOB_LD.items() if k != "validThrough"}
     assert extract_job_postings(ld_page(undated))[0].expired() is False
+
+
+# --- the per-query city must not reach a whole-board source ----------------
+#
+# `search_plan` rotates each query's city by date, and the pipeline calls a
+# single-shot source once per run. If such a source gated on that one rotated
+# city, it would return only the postings of whichever city the day's first
+# query happened to carry -- on two days in three, nothing at all. Every
+# whole-board adapter therefore gates on its own configured cities and drops an
+# empty argument, and `discover_jobs` now passes no city to it. These tests pin
+# the adapter half of that contract.
+
+GREENHOUSE_BOARD = {"jobs": [
+    {"id": 101, "title": "Java Entwickler", "location": {"name": "Frankfurt am Main"},
+     "absolute_url": "https://boards.greenhouse.io/acme/jobs/101"},
+    {"id": 102, "title": "Linux Engineer", "location": {"name": "Stuttgart"},
+     "absolute_url": "https://boards.greenhouse.io/acme/jobs/102"},
+    {"id": 103, "title": "C++ Developer", "location": {"name": "Hamburg"},
+     "absolute_url": "https://boards.greenhouse.io/acme/jobs/103"},
+]}
+
+LEVER_BOARD = [
+    {"id": "lv-1", "text": "Backend Developer", "hostedUrl": "https://jobs.lever.co/acme/lv-1",
+     "categories": {"location": "Frankfurt am Main"}},
+    {"id": "lv-2", "text": "Platform Engineer", "hostedUrl": "https://jobs.lever.co/acme/lv-2",
+     "categories": {"location": "Heilbronn"}},
+]
+
+CITIES = ("Frankfurt am Main", "Stuttgart", "Heilbronn")
+
+
+@pytest.mark.parametrize("passed_city", ["", "Frankfurt am Main", "Stuttgart",
+                                         "Heilbronn", "Hamburg"])
+def test_greenhouse_gates_on_its_configured_cities_not_the_passed_one(passed_city):
+    session = Session({"boards-api.greenhouse.io": Response(GREENHOUSE_BOARD)})
+    source = GreenhouseSource(["acme"], session=session, attempts=1, cities=CITIES)
+    found = source.discover(term="anything", city=passed_city)
+    roles = sorted(job.role for job in found)
+    assert roles == ["Java Entwickler", "Linux Engineer"], (
+        f"city={passed_city!r} changed the board result to {roles}")
+
+
+@pytest.mark.parametrize("passed_city", ["", "Stuttgart", "Hamburg"])
+def test_lever_gates_on_its_configured_cities_not_the_passed_one(passed_city):
+    session = Session({"api.lever.co": Response(LEVER_BOARD)})
+    source = LeverSource(["acme"], session=session, attempts=1, cities=CITIES)
+    roles = sorted(job.role for job in source.discover(term="x", city=passed_city))
+    assert roles == ["Backend Developer", "Platform Engineer"]
+
+
+@pytest.mark.parametrize("passed_city", ["", "Frankfurt am Main", "Hamburg"])
+def test_ashby_gates_on_its_configured_cities_not_the_passed_one(passed_city):
+    session = Session({"api.ashbyhq.com": Response(ASHBY_PAYLOAD)})
+    source = AshbySource(["acme"], session=session, attempts=1, cities=CITIES,
+                         allow_remote_germany=True)
+    found = source.discover(term="x", city=passed_city)
+    assert [job.role for job in found] == ["AI Automation Engineer"], (
+        f"city={passed_city!r} changed the remote-Germany result")
+
+
+@pytest.mark.parametrize("passed_city", ["", "Stuttgart", "Hamburg"])
+def test_arbeitnow_gates_on_its_configured_cities_not_the_passed_one(passed_city):
+    from job_agent.collectors.arbeitnow import ArbeitnowSource
+
+    class Collector:
+        def fetch(self, pages=2):
+            return [
+                {"slug": "an-1", "title": "Python Developer", "company_name": "ACME",
+                 "location": "Frankfurt am Main", "url": "https://arbeitnow.com/x/an-1",
+                 "description": "Python und SQL. " * 20},
+                {"slug": "an-2", "title": "Java Developer", "company_name": "ACME",
+                 "location": "Hamburg", "url": "https://arbeitnow.com/x/an-2",
+                 "description": "Java. " * 20},
+            ]
+
+    source = ArbeitnowSource(Collector(), pages=1, cities=CITIES)
+    roles = [job.role for job in source.discover(term="x", city=passed_city)]
+    assert roles == ["Python Developer"], f"city={passed_city!r} changed the result"
+
+
+def test_every_whole_board_adapter_declares_its_cities():
+    """A single-shot source must own a city list; it is given no city per query."""
+    from job_agent.collectors.arbeitnow import ArbeitnowSource
+    from job_agent.collectors.career_page import CareerPageSource
+
+    for cls in (GreenhouseSource, LeverSource, AshbySource, ArbeitnowSource,
+                CareerPageSource):
+        assert cls.single_shot is True, cls.__name__
+        assert "cities" in cls.__init__.__code__.co_varnames, (
+            f"{cls.__name__} is single-shot but takes no cities, so it would "
+            "have to trust the pipeline's per-query city")
+
+
+def test_board_city_gate_precedence_is_configured_then_fallback_then_open():
+    """The three branches of the whole-board city gate, pinned.
+
+    Production always takes branch 1: `build_sources` supplies the Profile
+    tab's cities to every single-shot adapter.
+    """
+    from job_agent.sources import board_city_gate
+
+    # 1. Configured cities are authoritative; a stray argument cannot widen.
+    assert board_city_gate("Frankfurt am Main", CITIES, fallback_city="Hamburg")
+    assert not board_city_gate("Hamburg", CITIES, fallback_city="Hamburg"), \
+        "a per-query city must never add to the configured area"
+    assert board_city_gate("Stuttgart", CITIES, fallback_city="")
+
+    # 2. The fallback applies only with no configured cities.
+    assert board_city_gate("Hamburg", (), fallback_city="Hamburg")
+    assert not board_city_gate("Bremen", (), fallback_city="Hamburg")
+
+    # 3. Neither: open, and the pipeline's strict gate decides.
+    assert board_city_gate("Anywhere at all", ())
+    assert board_city_gate("Anywhere at all", ("", "  "))
